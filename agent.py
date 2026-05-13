@@ -536,6 +536,33 @@ def analyze_trade_history():
     except Exception as e:
         return f"分析失敗: {str(e)}"
 
+def is_stock_related(text):
+    """檢查問題是否與股票相關"""
+    stock_keywords = [
+        "股票", "漲", "跌", "買", "賣", "交易", "投資", "ETF", "基金",
+        "產業", "技術", "分析", "圖表", "走勢", "K線", "均線", "RSI",
+        "MACD", "成交量", "籌碼", "融資", "賺", "虧", "獲利", "停損",
+        "目標", "支撐", "壓力", "突破", "趨勢", "波段", "短線", "長線",
+        "套住", "解套", "反彈", "回檔", "盤整", "強勢", "弱勢", "大漲",
+        "閃崩", "融券", "借券", "除權", "除息", "配股", "配息", "新股",
+        "IPO", "下市", "上市", "公告", "財報", "營收", "EPS", "本益比",
+        "股價", "股數", "市值", "成交", "掛單", "委買", "委賣", "量能",
+        "波動", "風險", "報酬", "風報", "進場", "出場", "加碼", "減碼"
+    ]
+
+    text_lower = text.lower()
+
+    # 如果包含股票關鍵字
+    if any(kw in text_lower for kw in stock_keywords):
+        return True
+
+    # 如果是股票代號或台股代號
+    if re.search(r"[A-Z]{1,5}|\d{4}", text):
+        return True
+
+    return False
+
+
 def is_direct_ticker(text):
     text = text.strip().upper()
     # 排除帶斜杠的命令
@@ -856,7 +883,30 @@ Setup 類型：{setup["setup_type"]}
         messages=[
             {
                 "role": "system",
-                "content": "你是 WengStock AI，專業但好聊天的股票交易助理。"
+                "content": """你是 WengStock AI，專業的美股 Swing Trading 交易助理。
+
+你的定位：
+- 只回答股票和交易相關的問題
+- 有 10+ 年經驗的職業交易員
+- 重視風控和交易紀律，不是喊單老師
+- 用人話講，像真人交易員在 LINE 聊天
+
+你的原則：
+1. 第一優先是幫使用者避開爛交易，不是鼓勵做交易
+2. 如果風險高或位置不好，直接說不要做
+3. 如果資料不足，誠實說資料不足，不要亂編
+4. 不保證獲利，不說穩賺
+5. 優先提醒風險，再講機會
+
+回答風格：
+- 短、直接、有交易員感
+- 用「這位置我不會追」「我會等回踩」「風險報酬不漂亮」這種口語
+- 不要條列 1. 2. 3.（除非必要）
+- 更像 LINE 上的真人聊天，不像研究報告
+- 可以用「老實說」「有點像 FOMO」「這種我不做」
+
+如果使用者提到股票代號，利用提供的技術數據給出專業判斷。
+如果使用者沒提股票，用大盤狀態給出市場觀察。"""
             },
             {
                 "role": "user",
@@ -1158,7 +1208,19 @@ AMD 我已經買了，要不要停損？
                     reply_line(reply_token, f"⚠️ /stats 錯誤: {str(e)}")
 
             else:
-                if is_direct_ticker(user_msg):
+                # 先檢查是否與股票相關
+                if not is_stock_related(user_msg):
+                    reply_line(
+                        reply_token,
+                        "我是 Swing Trading 專家，只能回答股票相關的問題 📈\n\n"
+                        "你可以問我：\n"
+                        "• 某支股票的技術分析\n"
+                        "• 產業趨勢和資金流向\n"
+                        "• 交易策略和風控\n"
+                        "• 市場行情解讀\n\n"
+                        "或輸入 /help 查看更多功能"
+                    )
+                elif is_direct_ticker(user_msg):
                     analysis = get_ai_analysis(user_msg)
                     reply_line(
                         reply_token,
