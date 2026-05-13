@@ -538,6 +538,9 @@ def analyze_trade_history():
 
 def is_direct_ticker(text):
     text = text.strip().upper()
+    # 排除帶斜杠的命令
+    if text.startswith("/"):
+        return False
     # 排除命令關鍵字
     if text in ["STATUS", "STATS", "HELP", "MORNING"]:
         return False
@@ -1143,9 +1146,12 @@ AMD 我已經買了，要不要停損？
 """
                 reply_line(reply_token, help_text)
 
-            elif user_msg.lower() in ["/stats", "stats", "統計"]:
-                stats = analyze_trade_history()
-                reply_line(reply_token, stats)
+            elif user_msg.lower().strip() in ["/stats", "stats", "統計"]:
+                try:
+                    stats = analyze_trade_history()
+                    reply_line(reply_token, stats)
+                except Exception as e:
+                    reply_line(reply_token, f"⚠️ /stats 錯誤: {str(e)}")
 
             else:
                 if is_direct_ticker(user_msg):
