@@ -532,6 +532,9 @@ def analyze_trade_history():
 
 def is_direct_ticker(text):
     text = text.strip().upper()
+    # 排除命令關鍵字
+    if text in ["STATUS", "STATS", "HELP", "MORNING"]:
+        return False
     return bool(re.fullmatch(r"[A-Z]{1,5}", text)) or bool(re.fullmatch(r"\d{4}", text))
 
 
