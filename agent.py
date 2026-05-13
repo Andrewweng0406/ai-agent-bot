@@ -499,36 +499,42 @@ def analyze_trade_history():
     try:
         with open("trades.json", "r") as f:
             trades = json.load(f)
-    except:
-        return "尚無交易記錄"
+    except Exception as e:
+        return f"無交易記錄或文件讀取失敗: {str(e)}"
+
+    if not isinstance(trades, list):
+        return "交易記錄格式有誤"
 
     if len(trades) < 3:
-        return f"目前共記錄 {len(trades)} 筆，資料不足以分析"
+        return f"目前共記錄 {len(trades)} 筆，資料不足以分析（需要至少 3 筆）"
 
-    df = pd.DataFrame(trades)
+    try:
+        df = pd.DataFrame(trades)
 
-    setup_counts = df["setup_type"].value_counts().to_dict()
-    rating_counts = df["rating"].value_counts().to_dict()
+        setup_counts = df["setup_type"].value_counts().to_dict()
+        rating_counts = df["rating"].value_counts().to_dict()
 
-    recent = df.tail(20)
-    market_dist = recent["market_status"].value_counts().to_dict()
+        recent = df.tail(20)
+        market_dist = recent["market_status"].value_counts().to_dict()
 
-    avg_rr = df["rr_ratio"].mean()
+        avg_rr = df["rr_ratio"].mean()
 
-    lines = ["📊 交易記錄分析"]
-    lines.append(f"總記錄筆數：{len(trades)}")
-    lines.append(f"平均風報比：{avg_rr:.2f}R")
-    lines.append(f"\nSetup 分佈：")
-    for k, v in setup_counts.items():
-        lines.append(f"  {k}: {v} 次")
-    lines.append(f"\n系統評級分佈：")
-    for k, v in rating_counts.items():
-        lines.append(f"  {k}: {v} 次")
-    lines.append(f"\n最近 20 筆大盤環境：")
-    for k, v in market_dist.items():
-        lines.append(f"  {k}: {v} 次")
+        lines = ["📊 交易記錄分析"]
+        lines.append(f"總記錄筆數：{len(trades)}")
+        lines.append(f"平均風報比：{avg_rr:.2f}R")
+        lines.append(f"\nSetup 分佈：")
+        for k, v in setup_counts.items():
+            lines.append(f"  {k}: {v} 次")
+        lines.append(f"\n系統評級分佈：")
+        for k, v in rating_counts.items():
+            lines.append(f"  {k}: {v} 次")
+        lines.append(f"\n最近 20 筆大盤環境：")
+        for k, v in market_dist.items():
+            lines.append(f"  {k}: {v} 次")
 
-    return "\n".join(lines)
+        return "\n".join(lines)
+    except Exception as e:
+        return f"分析失敗: {str(e)}"
 
 def is_direct_ticker(text):
     text = text.strip().upper()
