@@ -871,6 +871,10 @@ def get_ai_analysis(user_input):
     try:
         user_input = user_input.strip()
 
+        # 直接拒絕帶斜杠或無效字符的輸入
+        if user_input.startswith("/") or not user_input or len(user_input) > 10:
+            return f"❌ '{user_input}' 不是有效的股票代號，請輸入正確的代號（例如：NVDA, TSLA, 2330）"
+
         if user_input.isdigit() and len(user_input) == 4:
             symbol = f"{user_input}.TW"
             is_us_stock = False
