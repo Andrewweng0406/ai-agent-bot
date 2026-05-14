@@ -13,7 +13,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 user_memory = {}
 
-load_dotenv()
+# Load .env from script directory
+dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+load_dotenv(dotenv_path)
 
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
