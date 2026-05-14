@@ -1109,11 +1109,17 @@ def reply_line(reply_token, text):
     }
 
     try:
-        r = requests.post(url, headers=headers, json=payload)
+        with open("/tmp/agent_webhook.log", "a") as f:
+            f.write(f"[reply_line] Sending to token: {reply_token[:20]}..., text_len: {len(text)}\n")
+        r = requests.post(url, headers=headers, json=payload, timeout=10)
+        with open("/tmp/agent_webhook.log", "a") as f:
+            f.write(f"[reply_line] Status: {r.status_code}, Response: {r.text[:200]}\n")
         print(f"✅ LINE reply status: {r.status_code}")
         if r.status_code != 200:
             print(f"❌ LINE reply error: {r.text}")
     except Exception as e:
+        with open("/tmp/agent_webhook.log", "a") as f:
+            f.write(f"[reply_line] Exception: {str(e)}\n")
         print(f"❌ LINE reply exception: {str(e)}")
 
 def push_line(user_id, text):
