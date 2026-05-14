@@ -18,7 +18,7 @@ dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
 load_dotenv(dotenv_path)
 
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
+LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 MY_LINE_USER_ID = os.getenv("MY_LINE_USER_ID")
 
 # Debug: Log loaded tokens
