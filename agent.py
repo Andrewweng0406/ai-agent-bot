@@ -1152,6 +1152,8 @@ def callback():
         return "OK", 200
 
     body = request.get_data(as_text=True)
+    with open("/tmp/agent_webhook.log", "a") as f:
+        f.write(f"\n{'='*50}\n[{datetime.now()}] BODY: {body}\n")
     print("BODY:", body)
 
     try:
