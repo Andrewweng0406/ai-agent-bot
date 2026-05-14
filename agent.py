@@ -1108,8 +1108,13 @@ def reply_line(reply_token, text):
         ]
     }
 
-    r = requests.post(url, headers=headers, json=payload)
-    print("LINE reply status:", r.status_code, r.text)
+    try:
+        r = requests.post(url, headers=headers, json=payload)
+        print(f"✅ LINE reply status: {r.status_code}")
+        if r.status_code != 200:
+            print(f"❌ LINE reply error: {r.text}")
+    except Exception as e:
+        print(f"❌ LINE reply exception: {str(e)}")
 
 def push_line(user_id, text):
     url = "https://api.line.me/v2/bot/message/push"
