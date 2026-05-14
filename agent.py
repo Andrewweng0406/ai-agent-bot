@@ -19,6 +19,11 @@ OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 MY_LINE_USER_ID = os.getenv("MY_LINE_USER_ID")
 
+# Debug: Log loaded tokens
+with open("/tmp/agent_webhook.log", "a") as f:
+    f.write(f"\n[STARTUP] OPENAI_KEY: {OPENAI_KEY[:30] if OPENAI_KEY else 'NONE'}...\n")
+    f.write(f"[STARTUP] LINE_ACCESS_TOKEN: {LINE_ACCESS_TOKEN[:30] if LINE_ACCESS_TOKEN else 'NONE'}...\n")
+
 client = OpenAI(api_key=OPENAI_KEY)
 app = Flask(__name__)
 
