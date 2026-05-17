@@ -11,7 +11,10 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
+from market_router import MarketRouter, Market
+
 user_memory = {}
+_router = MarketRouter()
 
 # Load .env from script directory
 dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
@@ -607,35 +610,28 @@ def extract_symbol_from_text(text):
 
 def get_stock_snapshot(symbol):
     try:
-        if symbol.isdigit() and len(symbol) == 4:
-            yf_symbol = f"{symbol}.TW"
-        else:
-            yf_symbol = symbol.upper()
+        result = _router.route(symbol)
 
-        ticker = yf.Ticker(yf_symbol)
-
-        daily = ticker.history(period="6mo", interval="1d", auto_adjust=False)
-        h4 = ticker.history(period="60d", interval="1h", auto_adjust=False)
-        h1 = ticker.history(period="30d", interval="1h", auto_adjust=False)
-
-        if daily.empty or h4.empty or h1.empty:
+        if result.daily.empty or result.h4.empty or result.h1.empty:
             return None, f"找不到 {symbol} 的足夠資料。"
 
-        daily = add_indicators(daily).dropna()
-        h4 = add_indicators(h4).dropna()
-        h1 = add_indicators(h1).dropna()
+        daily = add_indicators(result.daily).dropna()
+        h4 = add_indicators(result.h4).dropna()
+        h1 = add_indicators(result.h1).dropna()
 
         market = get_market_filter()
         setup = detect_swing_setup(daily, h4, h1, market)
-        news = get_stock_news(yf_symbol)
+        news = get_stock_news(result.symbol)
 
         return {
-            "symbol": yf_symbol,
+            "symbol": result.symbol,
             "setup": setup,
             "news": news,
             "market": market
         }, None
 
+    except ValueError as e:
+        return None, str(e)
     except Exception as e:
         return None, str(e)
 
@@ -928,39 +924,23 @@ def get_ai_analysis(user_input):
     try:
         user_input = user_input.strip()
 
-        # 直接拒絕帶斜杠或無效字符的輸入
         if user_input.startswith("/") or not user_input or len(user_input) > 10:
             return f"❌ '{user_input}' 不是有效的股票代號，請輸入正確的代號（例如：NVDA, TSLA, 2330）"
 
-        if user_input.isdigit() and len(user_input) == 4:
-            symbol = f"{user_input}.TW"
-            is_us_stock = False
-        else:
-            symbol = user_input.upper()
-            is_us_stock = True
+        try:
+            result = _router.route(user_input)
+        except ValueError:
+            return f"❌ '{user_input}' 不是有效的股票代號，請輸入正確的代號（例如：NVDA, TSLA, 2330）"
 
-        print(f"🚀 Swing 分析中: {symbol}")
+        symbol = result.symbol
+        print(f"🚀 Swing 分析中: {symbol} [{result.market.value}]")
 
-        ticker = yf.Ticker(symbol)
-
-        daily = ticker.history(period="6mo", interval="1d", auto_adjust=False)
-        h4 = ticker.history(period="60d", interval="1h", auto_adjust=False)
-        h1 = ticker.history(period="30d", interval="1h", auto_adjust=False)
-
-        # 台股上櫃
-        if daily.empty and not is_us_stock:
-            symbol = f"{user_input}.TWO"
-            ticker = yf.Ticker(symbol)
-            daily = ticker.history(period="6mo", interval="1d", auto_adjust=False)
-            h4 = ticker.history(period="60d", interval="1h", auto_adjust=False)
-            h1 = ticker.history(period="30d", interval="1h", auto_adjust=False)
-
-        if daily.empty or h4.empty or h1.empty:
+        if result.daily.empty or result.h4.empty or result.h1.empty:
             return f"❌ 找不到 {symbol} 的足夠資料，請檢查代號。"
 
-        daily = add_indicators(daily).dropna()
-        h4 = add_indicators(h4).dropna()
-        h1 = add_indicators(h1).dropna()
+        daily = add_indicators(result.daily).dropna()
+        h4 = add_indicators(result.h4).dropna()
+        h1 = add_indicators(result.h1).dropna()
 
         if len(daily) < 50:
             return f"❌ {symbol} 資料不足，無法做 Swing 判斷。"
