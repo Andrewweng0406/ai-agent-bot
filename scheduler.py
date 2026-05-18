@@ -674,6 +674,9 @@ def _run_async(coro) -> None:
             asyncio.ensure_future(coro)
         else:
             loop.run_until_complete(coro)
+    except RuntimeError:
+        # uvicorn thread-pool threads have no current event loop — create one
+        asyncio.run(coro)
     except Exception as e:
         log.error(f"排程橋接失敗: {e}")
 

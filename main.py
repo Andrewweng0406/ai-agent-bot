@@ -442,6 +442,7 @@ async def scheduler_status(request: Request) -> dict:
     }
 
 
+@app.post("/callback")
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
     try:
