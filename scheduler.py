@@ -28,6 +28,7 @@ from tenacity import (
     wait_exponential,
     before_sleep_log,
 )
+from watchlist import get_watchlist_by_market, get_all_symbols_by_market, get_users_tracking
 
 # ─────────────────────────────────────────────
 # Logging 設定
@@ -293,38 +294,15 @@ async def ai_generate_report(model: str, prompt: str) -> str:
 # ─────────────────────────────────────────────
 
 def db_get_watchlist(market_type: str) -> list[dict]:
-    """
-    模擬從 PostgreSQL 撈取自選股清單。
-    實際 SQL：
-        SELECT u.line_user_id, w.stock_code
-        FROM watchlist w JOIN users u ON w.user_id = u.id
-        WHERE w.market_type = :market_type
-    """
-    _mock_data = {
-        "TW": [
-            {"line_user_id": "U_alice", "stock_code": "2330"},
-            {"line_user_id": "U_bob",   "stock_code": "2454"},
-            {"line_user_id": "U_alice", "stock_code": "2317"},
-        ],
-        "US": [
-            {"line_user_id": "U_alice", "stock_code": "NVDA"},
-            {"line_user_id": "U_bob",   "stock_code": "TSLA"},
-            {"line_user_id": "U_carol", "stock_code": "AMD"},
-        ],
-    }
-    return _mock_data.get(market_type, [])
+    return get_watchlist_by_market(market_type)
 
 
 def db_get_all_us_watchlist_symbols() -> list[str]:
-    """撈取所有用戶追蹤的美股代號（去重）"""
-    rows = db_get_watchlist("US")
-    return list({r["stock_code"] for r in rows})
+    return get_all_symbols_by_market("US")
 
 
 def db_get_users_tracking(stock_code: str) -> list[str]:
-    """找出追蹤特定股票的所有用戶 line_user_id"""
-    rows = db_get_watchlist("US")
-    return [r["line_user_id"] for r in rows if r["stock_code"] == stock_code]
+    return get_users_tracking(stock_code)
 
 
 # ─────────────────────────────────────────────

@@ -73,6 +73,51 @@ def add_indicators(df):
 
     return df
 
+def get_earnings_warning(symbol: str) -> str | None:
+    """
+    如果財報日在 7 天內，回傳警告字串；否則回傳 None。
+    用於即時查詢（/watch 或一般分析）。
+    """
+    try:
+        ticker = yf.Ticker(symbol)
+
+        # 嘗試 earnings_dates（新版 yfinance）
+        try:
+            ed = ticker.earnings_dates
+            if ed is not None and not ed.empty:
+                now    = pd.Timestamp.now(tz="UTC")
+                future = ed[ed.index > now]
+                if not future.empty:
+                    # earnings_dates 是降序排列，最近未來的在 tail
+                    next_dt = future.index[-1]
+                    days    = int((next_dt.tz_convert("UTC") - now).days)
+                    if 0 <= days <= 7:
+                        return (
+                            f"⚠️ 財報警告：{symbol} 將於 {days} 天後"
+                            f"（{next_dt.strftime('%m/%d')}）公布財報，\n"
+                            "財報前後波動劇烈，請注意部位風險！"
+                        )
+        except Exception:
+            pass
+
+        # Fallback：calendar dict
+        cal = ticker.calendar
+        if isinstance(cal, dict) and "Earnings Date" in cal:
+            dates = cal["Earnings Date"]
+            if dates:
+                next_dt = pd.Timestamp(dates[0])
+                days    = int((next_dt - pd.Timestamp.now()).days)
+                if 0 <= days <= 7:
+                    return (
+                        f"⚠️ 財報警告：{symbol} 將於 {days} 天後"
+                        f"（{next_dt.strftime('%m/%d')}）公布財報，\n"
+                        "財報前後波動劇烈，請注意部位風險！"
+                    )
+    except Exception:
+        pass
+    return None
+
+
 def get_stock_news(symbol):
     try:
         rss_url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"

@@ -16,6 +16,7 @@ from agent import (
     detect_swing_setup,
     get_market_filter,
     get_stock_news,
+    get_earnings_warning,
     is_stock_related,
     is_direct_ticker,
     is_industry_question,
@@ -26,6 +27,10 @@ from agent import (
     scan_market_sync,
 )
 from alerts import add_alert, remove_alert, format_user_alerts
+from watchlist import (
+    add_watch, remove_watch, format_user_watchlist,
+    is_new_user, mark_user_seen,
+)
 from market_router import MarketRouter
 from models import watchlist_router, create_tables
 from flex_builder import build_stock_report_flex
@@ -330,6 +335,66 @@ async def run_scan_analysis(market: str, user_id: str) -> None:
         await push_line(user_id, "⚠️ 掃描時發生錯誤，請稍後再試。")
 
 
+async def run_compare_analysis(sym1: str, sym2: str, user_id: str) -> None:
+    """同時分析兩支股票，給出孰優孰劣的建議。"""
+    try:
+        loop = asyncio.get_event_loop()
+        r1, r2 = await asyncio.gather(
+            loop.run_in_executor(None, router.route, sym1),
+            loop.run_in_executor(None, router.route, sym2),
+        )
+
+        results = []
+        market = await loop.run_in_executor(None, get_market_filter)
+        for sym, fr in [(sym1, r1), (sym2, r2)]:
+            daily = add_indicators(fr.daily).dropna()
+            h4    = add_indicators(fr.h4).dropna()
+            h1    = add_indicators(fr.h1).dropna()
+            setup = detect_swing_setup(daily, h4, h1, market)
+            results.append((fr.symbol, setup))
+
+        def badge(r: str) -> str:
+            r = r.lower()
+            if "high" in r: return "🟢"
+            if "watch" in r: return "🟡"
+            return "🔴"
+
+        lines = [f"⚔️ {results[0][0]} vs {results[1][0]} 對比分析\n"]
+        for sym, s in results:
+            lines.append(
+                f"{badge(s['rating'])} {sym}\n"
+                f"   評級：{s['rating']}\n"
+                f"   Setup：{s.get('setup_type','N/A')}\n"
+                f"   進場：{s.get('planned_entry',0):.2f}\n"
+                f"   止損：{s.get('stop_loss',0):.2f}\n"
+                f"   目標：{s.get('target_1',0):.2f}\n"
+                f"   風報比：{s.get('rr_ratio',0):.1f}R\n"
+            )
+
+        rr0, rr1 = results[0][1].get("rr_ratio", 0), results[1][1].get("rr_ratio", 0)
+        r0_ok = not results[0][1].get("overheat_alert") and not results[0][1].get("storm_mode")
+        r1_ok = not results[1][1].get("overheat_alert") and not results[1][1].get("storm_mode")
+
+        if r0_ok and (not r1_ok or rr0 >= rr1):
+            winner = results[0][0]
+        elif r1_ok:
+            winner = results[1][0]
+        else:
+            winner = None
+
+        if winner:
+            lines.append(f"👑 AI 優先推薦：{winner}（風報比較高 / 無熔斷）")
+        else:
+            lines.append("⚠️ 兩支目前均有熔斷或警示，建議等待更好時機")
+        lines.append("\n輸入代號查看完整 Flex 分析（例：NVDA）")
+
+        await push_line(user_id, "\n".join(lines))
+
+    except Exception as e:
+        print(f"❌ Compare 失敗: {e}")
+        await push_line(user_id, "⚠️ 比較分析時發生錯誤，請稍後再試。")
+
+
 async def run_chat_response(user_msg: str, user_id: str) -> None:
     """
     非代號的股票相關問題 → gpt-4o-mini 輕量回覆。
@@ -501,6 +566,11 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
 
         print(f"💬 [{user_id[:8]}...] {user_msg}")
 
+        # ── 新用戶歡迎
+        if is_new_user(user_id):
+            mark_user_seen(user_id)
+            await push_line(user_id, _welcome_text())
+
         # ── 快速命令（同步直接回覆）
         if user_msg.lower() in ["/help", "help", "幫助"]:
             await reply_line(reply_token, _help_text())
@@ -578,6 +648,47 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
                 await reply_line(reply_token, remove_alert(user_id, sym))
             continue
 
+        # ── /watch SYMBOL → 加入自選股
+        if lower.startswith("/watch ") or lower.startswith("watch "):
+            parts = user_msg.split()
+            if len(parts) >= 2 and is_direct_ticker(parts[1]):
+                sym = parts[1].upper()
+                msg = add_watch(user_id, sym)
+                earn = get_earnings_warning(sym)
+                if earn:
+                    msg += f"\n\n{earn}"
+                await reply_line(reply_token, msg)
+            else:
+                await reply_line(reply_token,
+                    "請輸入正確的股票代號 📋\n\n例如：/watch NVDA")
+            continue
+
+        # ── /unwatch SYMBOL → 移除自選股
+        if lower.startswith("/unwatch ") or lower.startswith("unwatch "):
+            parts = user_msg.split()
+            if len(parts) >= 2:
+                sym = parts[1].upper()
+                await reply_line(reply_token, remove_watch(user_id, sym))
+            continue
+
+        # ── /mywatchlist → 查看自選股
+        if lower in ["/mywatchlist", "mywatchlist", "我的自選股", "自選股"]:
+            await reply_line(reply_token, format_user_watchlist(user_id))
+            continue
+
+        # ── /compare SYM1 SYM2 → 同板塊比較
+        if lower.startswith("/compare ") or lower.startswith("compare "):
+            parts = user_msg.split()
+            if len(parts) >= 3 and is_direct_ticker(parts[1]) and is_direct_ticker(parts[2]):
+                s1, s2 = parts[1].upper(), parts[2].upper()
+                await reply_line(reply_token,
+                    f"⚔️ 正在比較 {s1} vs {s2}，請稍候約 20 秒...")
+                background_tasks.add_task(run_compare_analysis, s1, s2, user_id)
+            else:
+                await reply_line(reply_token,
+                    "請輸入兩個股票代號 📊\n\n例如：/compare NVDA AMD")
+            continue
+
         # ── /scan [美股|台股|US|TW] → 掃描 watchlist
         if lower.startswith("/scan") or lower in ["scan", "掃描", "掃一下"]:
             parts = lower.split()
@@ -617,6 +728,23 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
 # Help 文字
 # ─────────────────────────────────────────────
 
+def _welcome_text() -> str:
+    return """
+👋 歡迎使用 WengStock AI！
+
+我是你的 Swing Trading 專屬助理，幫你找進場機會、控制風險、守住資產。
+
+快速開始：
+  📊 輸入股票代號 → NVDA
+  🔍 掃描今日機會 → /scan 美股
+  📋 加入自選股   → /watch NVDA
+
+輸入 /help 查看所有功能。
+
+⚠️ 我不是喊單工具，每個決定請自行判斷風險。
+""".strip()
+
+
 def _help_text() -> str:
     return """
 🤖 WengStock AI v2
@@ -627,6 +755,14 @@ def _help_text() -> str:
 🔍 掃描推薦（幫你找今日機會）：
   /scan 美股
   /scan 台股
+
+⚔️ 同板塊比較：
+  /compare NVDA AMD
+
+📋 個人自選股（每日自動推播）：
+  /watch NVDA      加入自選股
+  /unwatch NVDA    移除自選股
+  /mywatchlist     查看清單
 
 📤 出場分析（手上有股票要不要賣）：
   /exit NVDA
