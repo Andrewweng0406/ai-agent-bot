@@ -323,5 +323,18 @@
         "target_1": 438.01,
         "target_2": 461.24,
         "rr_ratio": 1.79
+    },
+    {
+        "timestamp": "2026-05-13 19:00:54",
+        "symbol": "NVDA",
+        "setup_type": "Overextended",
+        "rating": "\ud83d\udd34 No Trade",
+        "market_status": "\u5f37\u52e2",
+        "price": 225.83,
+        "planned_entry": 209.38,
+        "stop_loss": 200.46,
+        "target_1": 225.6,
+        "target_2": 237.76,
+        "rr_ratio": 1.82
     }
 ]

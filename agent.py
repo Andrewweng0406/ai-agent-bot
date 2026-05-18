@@ -25,10 +25,6 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 MY_LINE_USER_ID = os.getenv("MY_LINE_USER_ID")
 
 # Debug: Log loaded tokens
-with open("/tmp/agent_webhook.log", "a") as f:
-    f.write(f"\n[STARTUP] OPENAI_KEY: {OPENAI_KEY[:30] if OPENAI_KEY else 'NONE'}...\n")
-    f.write(f"[STARTUP] LINE_ACCESS_TOKEN: {LINE_ACCESS_TOKEN[:30] if LINE_ACCESS_TOKEN else 'NONE'}...\n")
-
 client = OpenAI(api_key=OPENAI_KEY)
 app = Flask(__name__)
 
@@ -72,6 +68,9 @@ def add_indicators(df):
     df["BB_Width"] = (df["BB_Upper"] - df["BB_Lower"]) / df["BB_Mid"]
     df["BB_Pos"] = (df["Close"] - df["BB_Lower"]) / (df["BB_Upper"] - df["BB_Lower"])
 
+    df["EMA5"]   = df["Close"].ewm(span=5,   adjust=False).mean()
+    df["EMA200"] = df["Close"].ewm(span=200, adjust=False).mean()
+
     return df
 
 def get_stock_news(symbol):
@@ -96,8 +95,9 @@ def get_stock_news(symbol):
 
 def get_market_filter():
     try:
-        qqq = yf.Ticker("QQQ").history(period="6mo", interval="1d")
-        spy = yf.Ticker("SPY").history(period="6mo", interval="1d")
+        # 用 1y 確保有足夠資料計算 EMA200（大盤濾網鐵律二）
+        qqq = yf.Ticker("QQQ").history(period="1y", interval="1d")
+        spy = yf.Ticker("SPY").history(period="1y", interval="1d")
 
         qqq = add_indicators(qqq).dropna()
         spy = add_indicators(spy).dropna()
@@ -108,7 +108,41 @@ def get_market_filter():
         market_score = 0
         market_status = "中性"
         market_warning = []
+        storm_mode = False
+        storm_reason = ""
 
+        # ── 鐵律二：大盤 MA200 風暴防禦 ────────────────────────
+        spy_below_ma200 = s["Close"] < s.get("EMA200", s["Close"])
+        qqq_below_ma200 = q["Close"] < q.get("EMA200", q["Close"])
+
+        if spy_below_ma200 and qqq_below_ma200:
+            storm_mode = True
+            storm_reason = (
+                "🌪️ SPY 和 QQQ 同時跌破 200 日均線，市場正在刮超強颱風！"
+                "現在市場正在刮颱風，外面很危險，AI 建議您現在抱著現金好好休息，"
+                "等大晴天我們再出來開工！"
+            )
+            market_score -= 4
+            market_warning.append("⛔ SPY + QQQ 同破 MA200，進入熊市結構，嚴禁做多")
+        elif spy_below_ma200:
+            storm_mode = True
+            storm_reason = (
+                "⛈️ SPY 跌破 200 日均線，大盤進入颱風警報！"
+                "現在市場正在刮颱風，外面很危險，AI 建議您現在抱著現金好好休息，"
+                "等大晴天我們再出來開工！"
+            )
+            market_score -= 3
+            market_warning.append("⛔ SPY 跌破 MA200，大盤熊市結構確立")
+        elif qqq_below_ma200:
+            storm_mode = True
+            storm_reason = (
+                "⛈️ QQQ 跌破 200 日均線，科技股進入颱風警報！"
+                "現在市場正在刮颱風，外面很危險，AI 建議您減少曝險，以現金防禦為主。"
+            )
+            market_score -= 2
+            market_warning.append("⛔ QQQ 跌破 MA200，科技股熊市結構")
+
+        # ── 短中期大盤評估（原有邏輯）──────────────────────────
         if q["Close"] > q["EMA20"] > q["EMA50"]:
             market_score += 2
         else:
@@ -129,42 +163,78 @@ def get_market_filter():
             market_status = "震盪"
 
         return {
-            "score": market_score,
-            "status": market_status,
-            "warnings": market_warning
+            "score":        market_score,
+            "status":       market_status,
+            "warnings":     market_warning,
+            "storm_mode":   storm_mode,
+            "storm_reason": storm_reason,
         }
 
     except Exception as e:
         return {
-            "score": 0,
-            "status": "未知",
-            "warnings": [f"大盤資料讀取失敗：{str(e)}"]
+            "score":        0,
+            "status":       "未知",
+            "warnings":     [f"大盤資料讀取失敗：{str(e)}"],
+            "storm_mode":   False,
+            "storm_reason": "",
         }
 
 
 def detect_swing_setup(daily, h4, h1, market):
-    d = daily.iloc[-1]
-    h4_last = h4.iloc[-1]
-    h1_last = h1.iloc[-1]
+    d        = daily.iloc[-1]
+    h4_last  = h4.iloc[-1]
+    h1_last  = h1.iloc[-1]
 
-    price = d["Close"]
-    ema20 = d["EMA20"]
-    ema50 = d["EMA50"]
-    rsi = d["RSI"]
-    atr = d["ATR"]
-    vol_ratio = d["VOL_RATIO"]
+    price       = d["Close"]
+    open_price  = d.get("Open",  price)
+    high_price  = d.get("High",  price)
+    low_price   = d.get("Low",   price)
+    ema20       = d["EMA20"]
+    ema50       = d["EMA50"]
+    ema5        = d.get("EMA5", price)
+    rsi         = d["RSI"]
+    atr         = d["ATR"]
+    vol_ratio   = d["VOL_RATIO"]
 
     recent_high = daily["High"].iloc[-20:-1].max()
-    recent_low = daily["Low"].iloc[-20:-1].min()
+    recent_low  = daily["Low"].iloc[-20:-1].min()
 
-    score = 0
-    reasons = []
-    warnings = []
-    setup_type = "Neutral"
+    # ── 初始化 ─────────────────────────────────────────────
+    hard_no_trade    = False
+    overheat_alert   = False
+    distribution_alert = False
+    storm_mode       = market.get("storm_mode", False)
+    score            = 0
+    reasons          = []
+    warnings         = []
+    setup_type       = "Neutral"
 
-    # 大盤濾網
+    # ══════════════════════════════════════════════════════
+    # 鐵律一：追高強行熔斷（正乖離 > 15%）
+    # ══════════════════════════════════════════════════════
+    deviation_from_ma20_pct = (price - ema20) / ema20 * 100 if ema20 > 0 else 0
+
+    if deviation_from_ma20_pct > 15:
+        hard_no_trade  = True
+        overheat_alert = True
+        warnings.append(
+            f"🔥【追高熔斷】正乖離率 {deviation_from_ma20_pct:.1f}%！"
+            "現在這檔股票太熱太貴了，我們去買會幫別人洗碗，"
+            "請耐心等它降溫拉回再考慮！"
+        )
+
+    # ══════════════════════════════════════════════════════
+    # 鐵律二：大盤風暴防禦（MA200 跌破）
+    # ══════════════════════════════════════════════════════
+    if storm_mode:
+        hard_no_trade = True
+        warnings.append(market.get(
+            "storm_reason",
+            "大盤跌破 200 日均線，啟動防禦模式，請抱現金休息！"
+        ))
+
+    # ── 大盤濾網評分（原有邏輯）────────────────────────────
     score += market["score"]
-
     if market["status"] == "強勢":
         reasons.append("大盤濾網偏強，順風交易環境較好")
     elif market["status"] == "偏弱":
@@ -172,17 +242,17 @@ def detect_swing_setup(daily, h4, h1, market):
     else:
         warnings.append("大盤震盪，不能追高")
 
-    # 趨勢
+    # ── 趨勢 ────────────────────────────────────────────
     if price > ema20 > ema50:
         score += 2
         reasons.append("Daily 趨勢偏多，價格站上 EMA20 / EMA50")
     elif price < ema20 < ema50:
         score -= 2
-        reasons.append("Daily 趨勢偏空，價格跌破 EMA20 / EMA50")
+        warnings.append("Daily 趨勢偏空，價格跌破 EMA20 / EMA50")
     else:
         warnings.append("Daily 結構混亂，趨勢不夠乾淨")
 
-    # RSI
+    # ── RSI ─────────────────────────────────────────────
     if 55 <= rsi <= 70:
         score += 2
         reasons.append("RSI 在健康多頭區間")
@@ -193,7 +263,7 @@ def detect_swing_setup(daily, h4, h1, market):
         score -= 1
         warnings.append("RSI 偏弱，買方力量不足")
 
-    # 量能
+    # ── 量能 ─────────────────────────────────────────────
     if vol_ratio >= 1.5:
         score += 2
         reasons.append("量能明顯放大，有資金進場跡象")
@@ -201,11 +271,10 @@ def detect_swing_setup(daily, h4, h1, market):
         score -= 1
         warnings.append("量能不足，突破可信度偏低")
 
-    # MACD 確認
-    macd_hist = d.get("MACD_Hist", 0)
-    macd_val = d.get("MACD", 0)
+    # ── MACD ─────────────────────────────────────────────
+    macd_hist   = d.get("MACD_Hist",   0)
+    macd_val    = d.get("MACD",        0)
     macd_signal = d.get("MACD_Signal", 0)
-
     if macd_hist > 0 and macd_val > macd_signal:
         score += 1
         reasons.append("MACD 柱狀圖翻正，動能轉強")
@@ -213,7 +282,7 @@ def detect_swing_setup(daily, h4, h1, market):
         score -= 1
         warnings.append("MACD 動能仍偏弱")
 
-    # Bollinger Bands 位置確認
+    # ── Bollinger Bands ──────────────────────────────────
     bb_pos = d.get("BB_Pos", 0.5)
     if 0.3 <= bb_pos <= 0.6:
         score += 1
@@ -224,7 +293,7 @@ def detect_swing_setup(daily, h4, h1, market):
     elif bb_pos < 0.2:
         warnings.append("接近布林帶下緣，方向不明")
 
-    # 突破
+    # ── 突破 ─────────────────────────────────────────────
     if price > recent_high:
         score += 2
         reasons.append("價格突破近 20 日高點")
@@ -233,68 +302,64 @@ def detect_swing_setup(daily, h4, h1, market):
         score -= 2
         warnings.append("價格跌破近 20 日低點")
 
-    # 4H setup
+    # ── 4H / 1H 多框架 ──────────────────────────────────
     if h4_last["Close"] > h4_last["EMA20"]:
         score += 1
         reasons.append("4H 仍站在 EMA20 上方")
     else:
         warnings.append("4H 尚未重新站穩 EMA20")
 
-    # 4H 進一步檢查 EMA50
-    h4_above_ema50 = h4_last["Close"] > h4_last.get("EMA50", h4_last["EMA20"])
-    if not h4_above_ema50:
+    if not h4_last["Close"] > h4_last.get("EMA50", h4_last["EMA20"]):
         score -= 1
         warnings.append("4H 跌破 EMA50，中期趨勢不夠強")
 
-    # 1H 進場
     if h1_last["Close"] > h1_last["EMA20"]:
         score += 1
         reasons.append("1H 短線進場結構偏強")
     else:
         warnings.append("1H 進場點還不夠漂亮")
 
-    # 1H MACD 動能確認
-    h1_macd_hist = h1_last.get("MACD_Hist", 0)
-    if h1_macd_hist > 0:
+    if h1_last.get("MACD_Hist", 0) > 0:
         score += 1
         reasons.append("1H MACD 動能翻正，進場確認度高")
     else:
         warnings.append("1H MACD 動能尚未翻正，等待確認")
 
-    # 三框架對齐檢查（嚴格禁止條件）
+    # 三框架全偏弱 → 嚴格禁止
     timeframe_alignment = sum([
         price > ema20 > ema50,
         h4_last["Close"] > h4_last["EMA20"],
         h1_last["Close"] > h1_last["EMA20"],
     ])
-
     if timeframe_alignment == 0:
         hard_no_trade = True
         warnings.append("三個時間框架全部偏弱，嚴格禁止進場")
 
-
-    entry_zone_low = ema20 - atr * 0.3
+    # ══════════════════════════════════════════════════════
+    # 進場區間
+    # ══════════════════════════════════════════════════════
+    entry_zone_low  = ema20 - atr * 0.3
     entry_zone_high = ema20 + atr * 0.3
+    planned_entry   = entry_zone_high
 
-    # 動態止損（根據 setup 類型調整）
-    setup_type_temp = "Breakout" if price > recent_high else "Pullback"
-    if setup_type_temp == "Breakout":
+    # 動態止損（原有）
+    if price > recent_high:
         stop_loss = entry_zone_low - atr * 0.5
     else:
         stop_loss = entry_zone_low - atr * 0.8
 
+    # ══════════════════════════════════════════════════════
+    # 鐵律三：止損絕對執行（2*ATR below entry，永遠輸出）
+    # ══════════════════════════════════════════════════════
+    stop_loss_price = round(planned_entry - 2 * atr, 2)
+
     target_1 = entry_zone_high + atr * 2.0
     target_2 = entry_zone_high + atr * 3.5
 
-    planned_entry = entry_zone_high
-
-    risk = planned_entry - stop_loss
-    reward = target_1 - planned_entry
+    risk     = planned_entry - stop_loss
+    reward   = target_1 - planned_entry
     rr_ratio = reward / risk if risk > 0 else 0
     distance_from_entry = (price - planned_entry) / planned_entry
-
-    # 硬性禁止條件
-    hard_no_trade = False
 
     if rr_ratio < 2.0:
         hard_no_trade = True
@@ -303,82 +368,204 @@ def detect_swing_setup(daily, h4, h1, market):
     if rsi > 75:
         hard_no_trade = True
         warnings.append("RSI 過熱，容易追在短線高點")
-    
-    # Setup 類型判斷
-    setup_type = "Neutral"
 
+    # ── Setup 類型最終判斷 ────────────────────────────────
     if abs(price - ema20) / ema20 < 0.02:
         setup_type = "Pullback"
     elif price > recent_high:
         setup_type = "Breakout"
 
     if distance_from_entry > 0.05:
-
-        if (
-            price > recent_high
-            and vol_ratio > 1.5
-            and market["score"] >= 2
-        ):
-
+        if price > recent_high and vol_ratio > 1.5 and market["score"] >= 2:
             reasons.append("強勢突破結構，允許 Momentum Breakout 模式")
             setup_type = "Momentum Breakout"
-
         else:
-
             hard_no_trade = True
             warnings.append("現價距離等待區過遠，不適合追價")
             setup_type = "Overextended"
 
-    # 評級系統
-    if hard_no_trade and setup_type != "Momentum Breakout":
+    # ══════════════════════════════════════════════════════
+    # 出場分析一：動態防守價（Trailing Stop，移動停利）
+    # ══════════════════════════════════════════════════════
+    recent_peak_close  = daily["Close"].iloc[-60:].max()
+    trailing_stop_3atr = round(recent_peak_close - 3 * atr, 2)
+    trailing_stop_ma5  = round(float(ema5), 2)
+    trailing_stop      = max(trailing_stop_3atr, trailing_stop_ma5)
+    holding_ok         = price > trailing_stop
+
+    # 預設：安心抱
+    exit_action  = "hold"
+    exit_message = (
+        f"✅【安心抱緊緊，先不要賣！】\n"
+        f"大戶還在踩油門，只要沒跌破 {trailing_stop:.2f} 元就安心抱著，"
+        "讓子彈飛，我們一起賺更多！"
+    )
+
+    # 跌破防線 → 提醒檢視
+    if not holding_ok:
+        exit_action  = "review"
+        exit_message = (
+            f"⚠️【注意！今日跌破動態防線 {trailing_stop:.2f}】\n"
+            "建議認真考慮減倉，保護到手的利潤。"
+        )
+
+    # ══════════════════════════════════════════════════════
+    # 出場分析二：極端正乖離 > 30%（分批停利）
+    # ══════════════════════════════════════════════════════
+    if deviation_from_ma20_pct > 30:
+        exit_action  = "partial_exit"
+        exit_message = (
+            f"🟡【金蟬脫殼，先賣 1/3 把錢放口袋！】\n"
+            f"正乖離 {deviation_from_ma20_pct:.1f}%，市場陷入散戶瘋狂期！"
+            "阿公阿嬤聽話，先賣掉三分之一，把賺來的錢放口袋，"
+            "剩下的繼續看它飛，這樣晚上才睡得著覺！"
+        )
+
+    # ══════════════════════════════════════════════════════
+    # 出場分析三：高檔爆量不漲（大戶倒貨警報）
+    # ══════════════════════════════════════════════════════
+    candle_range        = (high_price - low_price) if high_price != low_price else 0.01
+    upper_shadow        = high_price - max(d["Close"], open_price)
+    upper_shadow_ratio  = upper_shadow / candle_range
+    is_red_candle       = d["Close"] < open_price
+
+    if vol_ratio > 3.0 and (upper_shadow_ratio > 0.3 or is_red_candle):
+        distribution_alert = True
+        exit_action  = "full_exit"
+        exit_message = (
+            f"🔴【警報！大戶在跑了，我們全拿現！】\n"
+            f"成交量爆到平均的 {vol_ratio:.1f} 倍，K 線出現"
+            f"{'長上影線' if upper_shadow_ratio > 0.3 else '收黑K'}，"
+            "大老闆們在偷偷坐電梯下樓了！"
+            "今天請把股票全部賣掉，保住所有利潤，獲利落袋為安！"
+        )
+
+    # ── 評級系統 ─────────────────────────────────────────
+    if storm_mode:
+        rating = "🔴 Storm Defense / 風暴防禦"
+        bias   = "防禦現金"
+    elif overheat_alert:
+        rating = "🔴 Overheat / 追高熔斷"
+        bias   = "等候拉回"
+    elif hard_no_trade and setup_type != "Momentum Breakout":
         rating = "🔴 No Trade"
-        bias = "風險過高"
-    
+        bias   = "風險過高"
     elif setup_type == "Momentum Breakout":
         rating = "🟡 Momentum Watchlist"
-        bias = "強勢突破"
-
+        bias   = "強勢突破"
     elif score >= 6:
         rating = "🟢 High Quality Setup"
-        bias = "偏多"
-
+        bias   = "偏多"
     elif score >= 3:
         rating = "🟡 Watchlist / 等回踩"
-        bias = "偏多但需要確認"
-
+        bias   = "偏多但需要確認"
     elif score <= -3:
         rating = "🔴 Avoid / 偏空"
-        bias = "偏空"
-
+        bias   = "偏空"
     else:
         rating = "🔴 No Trade"
-        bias = "方向不明"
+        bias   = "方向不明"
 
     return {
-        "price": price,
-        "ema20": ema20,
-        "ema50": ema50,
-        "rsi": rsi,
-        "atr": atr,
-        "vol_ratio": vol_ratio,
-        "recent_high": recent_high,
-        "recent_low": recent_low,
-        "score": score,
-        "rating": rating,
-        "bias": bias,
-        "reasons": reasons,
-        "warnings": warnings,
-        "stop_loss": stop_loss,
-        "target_1": target_1,
-        "target_2": target_2,
-        "entry_zone_low": entry_zone_low,
-        "entry_zone_high": entry_zone_high,
-        "planned_entry": planned_entry,
-        "rr_ratio": rr_ratio,
+        # ── 基本技術指標 ──
+        "price":        price,
+        "ema20":        ema20,
+        "ema50":        ema50,
+        "rsi":          rsi,
+        "atr":          atr,
+        "vol_ratio":    vol_ratio,
+        "recent_high":  recent_high,
+        "recent_low":   recent_low,
+        # ── 評級 & 系統 ──
+        "score":        score,
+        "rating":       rating,
+        "bias":         bias,
+        "reasons":      reasons,
+        "warnings":     warnings,
+        "setup_type":   setup_type,
         "market_status": market["status"],
-        "setup_type": setup_type,
+        # ── 進場計畫 ──
+        "entry_zone_low":     entry_zone_low,
+        "entry_zone_high":    entry_zone_high,
+        "planned_entry":      planned_entry,
         "distance_from_entry": distance_from_entry,
+        # ── 鐵律三：止損（雙版本）──
+        "stop_loss":       stop_loss,
+        "stop_loss_price": stop_loss_price,   # 絕對止損 = entry - 2*ATR
+        # ── 目標 & 風報比 ──
+        "target_1":  target_1,
+        "target_2":  target_2,
+        "rr_ratio":  rr_ratio,
+        # ── 鐵律一：追高防護 ──
+        "deviation_from_ma20_pct": round(deviation_from_ma20_pct, 1),
+        "overheat_alert":          overheat_alert,
+        # ── 鐵律二：風暴防禦 ──
+        "storm_mode": storm_mode,
+        # ── 出場分析 ──
+        "trailing_stop":       trailing_stop,
+        "exit_action":         exit_action,
+        "exit_message":        exit_message,
+        "distribution_alert":  distribution_alert,
     }
+
+
+# =========================
+# 部位計算器
+# =========================
+
+def calc_position_size(setup: dict, account_size: float, risk_pct: float = 0.02) -> dict:
+    """
+    依帳戶規模與 2% 風控規則計算合理部位大小。
+    Returns dict with shares, position_value, max_loss etc.
+    """
+    planned_entry   = setup.get("planned_entry", 0)
+    stop_loss_price = setup.get("stop_loss_price") or setup.get("stop_loss", 0)
+
+    if planned_entry <= 0 or stop_loss_price <= 0:
+        return {"error": "無法計算：進場價或止損價為零"}
+
+    risk_per_share = planned_entry - stop_loss_price
+    if risk_per_share <= 0:
+        return {"error": "止損價必須低於進場價，請確認 setup 是否有效"}
+
+    risk_budget        = account_size * risk_pct           # 這筆最多虧多少錢
+    shares_by_risk     = risk_budget / risk_per_share      # 按風險反推股數
+    max_position_value = account_size * 0.20               # 單一部位上限 20%
+    shares_by_conc     = max_position_value / planned_entry
+
+    shares         = int(min(shares_by_risk, shares_by_conc))
+    shares         = max(shares, 1)
+    position_value = shares * planned_entry
+    actual_loss    = shares * risk_per_share
+
+    return {
+        "shares":          shares,
+        "planned_entry":   planned_entry,
+        "stop_loss_price": stop_loss_price,
+        "risk_per_share":  round(risk_per_share, 2),
+        "position_value":  round(position_value, 2),
+        "max_loss":        round(actual_loss, 2),
+        "pct_of_account":  round(position_value / account_size * 100, 1),
+        "risk_pct_actual": round(actual_loss / account_size * 100, 2),
+        "account_size":    account_size,
+    }
+
+
+def format_position_size(symbol: str, size: dict) -> str:
+    if "error" in size:
+        return f"❌ 部位計算失敗：{size['error']}"
+    return (
+        f"💰 {symbol} 部位計算\n"
+        f"帳戶規模：${size['account_size']:,.0f}\n\n"
+        f"建議買入：{size['shares']} 股\n"
+        f"計畫進場：${size['planned_entry']:,.2f}\n"
+        f"投入金額：${size['position_value']:,.2f}（佔帳戶 {size['pct_of_account']:.1f}%）\n\n"
+        f"🛡️ 絕對止損：${size['stop_loss_price']:,.2f}\n"
+        f"每股風險：${size['risk_per_share']:,.2f}\n"
+        f"最大損失：${size['max_loss']:,.2f}（帳戶 {size['risk_pct_actual']:.2f}%）\n\n"
+        f"⚠️ 這是 2% 風控計算，不保證獲利。\n"
+        f"跌破 ${size['stop_loss_price']:,.2f} 請一定要果斷賣掉，這是在保護我們的退休金！"
+    )
 
 
 # =========================
@@ -485,17 +672,24 @@ def log_trade(symbol, setup):
         trades = []
 
     trade_data = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "symbol": symbol,
-        "setup_type": setup.get("setup_type"),
-        "rating": setup.get("rating"),
+        "timestamp":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol":       symbol,
+        "setup_type":   setup.get("setup_type"),
+        "rating":       setup.get("rating"),
         "market_status": setup.get("market_status"),
-        "price": round(setup.get("price", 0), 2),
+        "price":        round(setup.get("price", 0), 2),
         "planned_entry": round(setup.get("planned_entry", 0), 2),
-        "stop_loss": round(setup.get("stop_loss", 0), 2),
-        "target_1": round(setup.get("target_1", 0), 2),
-        "target_2": round(setup.get("target_2", 0), 2),
-        "rr_ratio": round(setup.get("rr_ratio", 0), 2),
+        "stop_loss":    round(setup.get("stop_loss", 0), 2),
+        "stop_loss_price": round(setup.get("stop_loss_price", 0), 2),
+        "trailing_stop": round(setup.get("trailing_stop", 0), 2),
+        "target_1":     round(setup.get("target_1", 0), 2),
+        "target_2":     round(setup.get("target_2", 0), 2),
+        "rr_ratio":     round(setup.get("rr_ratio", 0), 2),
+        "deviation_from_ma20_pct": round(setup.get("deviation_from_ma20_pct", 0), 1),
+        "overheat_alert":    setup.get("overheat_alert", False),
+        "storm_mode":        setup.get("storm_mode", False),
+        "distribution_alert": setup.get("distribution_alert", False),
+        "exit_action":       setup.get("exit_action", "hold"),
     }
 
     trades.append(trade_data)
@@ -532,6 +726,26 @@ def analyze_trade_history():
         lines = ["📊 交易記錄分析"]
         lines.append(f"總記錄筆數：{len(trades)}")
         lines.append(f"平均風報比：{avg_rr:.2f}R")
+
+        # ── 真實勝率（由 scheduler 每日結算）────────────────
+        settled  = [t for t in trades if t.get("outcome") in ("win", "loss")]
+        timeouts = [t for t in trades if t.get("outcome") == "timeout"]
+        pending  = [t for t in trades if not t.get("outcome")]
+
+        lines.append(f"\n🎯 實際勝率分析：")
+        if settled:
+            wins     = sum(1 for t in settled if t["outcome"] == "win")
+            losses   = len(settled) - wins
+            win_rate = wins / len(settled) * 100
+            lines.append(f"  已結算：{len(settled)} 筆（勝 {wins} | 敗 {losses}）")
+            lines.append(f"  實際勝率：{win_rate:.1f}%")
+        else:
+            lines.append("  尚無已結算的交易（每日盤後自動計算）")
+        if timeouts:
+            lines.append(f"  超時未觸發：{len(timeouts)} 筆（未進場）")
+        if pending:
+            lines.append(f"  待結算：{len(pending)} 筆")
+
         lines.append(f"\nSetup 分佈：")
         for k, v in setup_counts.items():
             lines.append(f"  {k}: {v} 次")
@@ -961,113 +1175,137 @@ def get_ai_analysis(user_input):
 # =========================
 
 def call_openai_swing(symbol, setup, news):
-    news_text = "\n".join(
-    [f"- {n['title']}" for n in news]
-)
+    news_text = "\n".join([f"- {n['title']}" for n in news])
+
+    # ── 六條防護邏輯狀態 ────────────────────────────────────
+    storm_mode        = setup.get("storm_mode", False)
+    overheat_alert    = setup.get("overheat_alert", False)
+    distribution_alert = setup.get("distribution_alert", False)
+    exit_action       = setup.get("exit_action", "hold")
+    exit_message      = setup.get("exit_message", "")
+    dev_pct           = setup.get("deviation_from_ma20_pct", 0)
+    trailing_stop     = setup.get("trailing_stop", setup["stop_loss"])
+    stop_loss_price   = setup.get("stop_loss_price", setup["stop_loss"])
+
+    # ── 特殊情境的強制指示段 ─────────────────────────────────
+    iron_rule_section = ""
+
+    if storm_mode:
+        iron_rule_section += f"""
+⛔⛔⛔ 【大盤風暴防禦模式啟動】⛔⛔⛔
+{setup.get('warnings', [''])[0] if setup.get('warnings') else ''}
+你必須用最溫柔但堅定的語氣，用大白話（像對阿公阿嬤說話），
+完整傳達以下訊息：「現在市場正在刮颱風，外面很危險，
+AI 建議您現在抱著現金好好休息，等大晴天我們再出來開工！」
+不要做任何進場分析，只做防禦建議。
+"""
+
+    if overheat_alert and not storm_mode:
+        iron_rule_section += f"""
+🔥 【追高強行熔斷】
+正乖離率 {dev_pct:.1f}%，已超過 15% 安全門檻。
+你必須用最溫柔但堅定的語氣，用大白話告訴用戶：
+「現在這檔股票太熱太貴了，我們去買會幫別人洗碗，請耐心等它降溫拉回再考慮！」
+"""
+
+    if distribution_alert:
+        iron_rule_section += f"""
+🚨 【大戶倒貨警報】
+高檔爆量 {setup['vol_ratio']:.1f}x + K線異常，出場訊號已觸發。
+請完整傳達以下大白話訊息並放在最顯眼位置：
+{exit_message}
+"""
+    elif exit_action in ("partial_exit", "review"):
+        iron_rule_section += f"""
+📤 【出場訊號】{exit_action}
+{exit_message}
+請在報告中清楚傳達上述出場建議。
+"""
+
     prompt = f"""
-你是一個專業 Swing Trading 交易助理。
-你不是喊單老師，你的任務是提高交易紀律，過濾爛交易。
+你是 WengStock AI，一個充滿良心、最重視保護散戶與長輩資產的 Swing Trading 分析助理。
+你的核心宗旨：高勝率、絕對不割韭菜、全心保護散戶與長輩的長線資產。
+
+{iron_rule_section}
 
 股票：{symbol}
 
-數據：
+═══════════ 技術數據 ═══════════
 現價：{setup["price"]:.2f}
-Daily EMA20：{setup["ema20"]:.2f}
-Daily EMA50：{setup["ema50"]:.2f}
-RSI：{setup["rsi"]:.2f}
-ATR：{setup["atr"]:.2f}
-量比：{setup["vol_ratio"]:.2f}
-20日高點：{setup["recent_high"]:.2f}
-20日低點：{setup["recent_low"]:.2f}
-系統分數：{setup["score"]}
-系統評級：{setup["rating"]}
-Setup 類型：{setup["setup_type"]}
-方向：{setup["bias"]}
+EMA20：{setup["ema20"]:.2f}  EMA50：{setup["ema50"]:.2f}
+RSI：{setup["rsi"]:.2f}  ATR：{setup["atr"]:.2f}  量比：{setup["vol_ratio"]:.2f}
+正乖離率（MA20）：{dev_pct:.1f}%
+系統分數：{setup["score"]}  評級：{setup["rating"]}
+Setup 類型：{setup["setup_type"]}  方向：{setup["bias"]}
 大盤狀態：{setup["market_status"]}
+
+═══════════ 進場計畫 ═══════════
+等待回踩區：{setup["entry_zone_low"]:.2f} - {setup["entry_zone_high"]:.2f}
+計畫進場價：{setup["planned_entry"]:.2f}
+偏離等待區：{setup["distance_from_entry"] * 100:.1f}%
+
+═══════════ 鐵律三：止損（必須輸出）═══════════
+絕對止損價（2ATR below entry）：{stop_loss_price:.2f}
+動態止損參考：{setup["stop_loss"]:.2f}
+
+═══════════ 目標 & 風報比 ═══════════
+第一目標：{setup["target_1"]:.2f}  第二目標：{setup["target_2"]:.2f}
 風報比：{setup["rr_ratio"]:.2f}R
-目前價格與計畫進場價差距：{setup["price"] - setup["planned_entry"]:.2f}
 
-目前價格偏離等待區：
-{setup["distance_from_entry"] * 100:.2f}%
+═══════════ 出場分析 ═══════════
+動態防守價（Trailing Stop）：{trailing_stop:.2f}
+出場動作：{exit_action}
+出場訊息：{exit_message}
 
-近期新聞：
+═══════════ 支持理由 / 風險警告 ═══════════
+支持理由：{setup["reasons"]}
+風險警告：{setup["warnings"]}
+
+═══════════ 近期新聞 ═══════════
 {news_text}
 
-支持理由：
-{setup["reasons"]}
+═══════════ 輸出要求 ═══════════
 
-風險警告：
-{setup["warnings"]}
+請用繁體中文，輸出 LINE 適合閱讀的格式：
 
-等待回踩區：{setup["entry_zone_low"]:.2f} - {setup["entry_zone_high"]:.2f}
-參考停損：{setup["stop_loss"]:.2f}
-第一目標：{setup["target_1"]:.2f}
-第二目標：{setup["target_2"]:.2f}
-計畫進場價：{setup["planned_entry"]:.2f}
+📊 {symbol} Swing 分析
 
-請用繁體中文。
+1. 【方向 & 現況】目前趨勢與大盤評估
+2. 【Setup 品質】分析評級原因，如果 No Trade 說清楚為什麼
+3. 【進場策略】等待區、是否適合追價、距離評估
+4. 【🛡️ 止損鐵律】
+   必須用堅定的大白話寫這一段：
+   「看錯不可恥，如果跌破 {stop_loss_price:.2f} 元，請一定要果斷賣掉，
+   這是在保護我們的退休金！」
+5. 【出場訊號】
+   根據 exit_action 輸出對應的大白話出場建議（已在上面提供，直接套用）
+6. 【新聞面】新聞是否真的重要，對 swing 有無影響
+7. 【最後一句】一句簡短的交易紀律提醒
 
-除了技術面，
-還要分析：
-
-1. 新聞是否真的重要
-2. 對 swing trader 是短期、中期還是雜訊
-3. 市場是否可能已提前反映
-
-如果新聞沒什麼用，
-請直接說「新聞面影響有限」。
-
-如果 No Trade 的原因是「距離等待區過遠」，請不要說 Daily 結構混亂，除非 warnings 明確有這句。
-
-如果 Setup 類型是 Momentum Breakout
-請說明：
-這是強勢突破單，
-不是低風險回踩單。
-
-輸出 LINE 適合閱讀的格式：
-
-📊 股票 Swing 分析
-
-1. 方向與目前價格
-2. Setup 品質
-3. 等待區與進場策略
-4. 停損位置
-5. 目標價與風報比
-   如果系統評級是 🔴 No Trade，請不要強調目標價，只說「目前不執行目標價，因為尚未進入合理進場區」。
-6. 新聞面影響
-7. 不交易條件
-8. 最後一句紀律提醒
-
-要求：
-- 不要保證獲利
-- 不要說穩賺
-- 如果 setup 不好，要直接說不要做
-- 語氣專業、直接、有交易員感
-- 簡短清楚
-
-- 不要加入系統資料沒有提供的矛盾描述
-- 如果系統評級是 🟢，不要說 Daily 結構混亂
-- 如果 warnings 裡沒有該風險，不要自己編風險
-- 一定要說明：
-  1. 現價是否離等待區太遠
-  2. 是否適合追價
-  3. 跌破哪裡取消交易
+絕對規則：
+- 不要保證獲利，不要說穩賺
+- 如果 storm_mode 或 overheat_alert 啟動，第一段必須用大白話傳達熔斷訊息
+- 止損那段語氣必須溫柔但堅定，像在保護長輩
+- 不要加入 warnings 裡沒有的風險
+- 如果評級是 🔴，不要強調目標價，說「目前不執行目標，先等位置回到等待區」
+- 如果 distribution_alert 觸發，出場建議放在最顯眼位置（最前面或最大字）
 """
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         temperature=0.35,
-        max_tokens=700,
+        max_tokens=800,
         messages=[
             {
                 "role": "system",
-                "content": "你是專業、冷靜、重視風險的 Swing Trading 分析助理。"
+                "content": (
+                    "你是 WengStock AI，一個充滿良心的 Swing Trading 分析助理。"
+                    "你的核心宗旨是保護散戶與長輩資產，不割韭菜，永遠風控優先。"
+                    "你說話像一個有經驗的交易員在 LINE 上跟長輩解釋，溫柔但堅定，人話不是術語。"
+                ),
             },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
+            {"role": "user", "content": prompt},
+        ],
     )
 
     return response.choices[0].message.content
@@ -1218,6 +1456,7 @@ def callback():
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 📈 【快速命令】
 ━━━━━━━━━━━━━━━━━━━━━━━━━
+/exit NVDA 出場分析（手上有股票要不要賣）
 /morning   盤前簡報（美股開盤前掃描）
 /stats     交易統計（系統勝率分析）
 /help      這份說明
@@ -1250,6 +1489,31 @@ No Trade     不執行（位置差 / 風險大）
 ✓ 我關注風險報酬比
 """
                 reply_line(reply_token, help_text)
+
+            elif user_msg.lower().strip().startswith("/exit ") or user_msg.lower().strip().startswith("exit "):
+                parts = user_msg.strip().split()
+                if len(parts) >= 2 and is_direct_ticker(parts[1]):
+                    exit_sym = parts[1].upper()
+                    reply_line(reply_token, f"📤 {exit_sym} 出場分析中，請稍候約 15 秒...")
+                    # Flask 版沒有 BackgroundTasks，直接同步跑（未來遷移到 main.py 異步版）
+                    try:
+                        snapshot, err = get_stock_snapshot(exit_sym)
+                        if snapshot:
+                            s = snapshot["setup"]
+                            exit_msg = s.get("exit_message", "")
+                            trailing = s.get("trailing_stop", 0)
+                            slp = s.get("stop_loss_price", s["stop_loss"])
+                            reply_line(reply_token,
+                                f"📤 {exit_sym} 出場分析\n\n"
+                                f"動態防守價：{trailing:.2f}\n"
+                                f"絕對止損：{slp:.2f}\n\n"
+                                f"{exit_msg}\n\n"
+                                f"⚠️ 看錯不可恥，跌破止損請果斷賣掉，保護我們的退休金！"
+                            )
+                        else:
+                            reply_line(reply_token, f"❌ {err}")
+                    except Exception as e:
+                        reply_line(reply_token, f"⚠️ 出場分析失敗：{str(e)}")
 
             elif user_msg.lower().strip() in ["/stats", "stats", "統計"]:
                 try:

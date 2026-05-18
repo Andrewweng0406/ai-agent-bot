@@ -52,20 +52,25 @@ class DataService(Protocol):
 
 class TWDataService:
     def fetch(self, symbol: str) -> FetchResult:
+        # 台股一天只有 4.5 小時，1H K棒對多框架分析無意義。
+        # 改用三層日線替代多時間框架：
+        #   daily  = 1 年日線（主趨勢 + EMA200 計算）
+        #   h4     = 2 年週線（中期趨勢，等同美股 4H 的角色）
+        #   h1     = 60 天日線（短期動能，等同美股 1H 的角色）
         yf_symbol = f"{symbol}.TW"
         ticker = yf.Ticker(yf_symbol)
 
-        daily = ticker.history(period="6mo", interval="1d", auto_adjust=False)
-        h4 = ticker.history(period="60d", interval="1h", auto_adjust=False)
-        h1 = ticker.history(period="30d", interval="1h", auto_adjust=False)
+        daily = ticker.history(period="1y",  interval="1d",  auto_adjust=False)
+        h4    = ticker.history(period="2y",  interval="1wk", auto_adjust=False)
+        h1    = ticker.history(period="60d", interval="1d",  auto_adjust=False)
 
         # 上市找不到時，改找上櫃
         if daily.empty:
             yf_symbol = f"{symbol}.TWO"
             ticker = yf.Ticker(yf_symbol)
-            daily = ticker.history(period="6mo", interval="1d", auto_adjust=False)
-            h4 = ticker.history(period="60d", interval="1h", auto_adjust=False)
-            h1 = ticker.history(period="30d", interval="1h", auto_adjust=False)
+            daily = ticker.history(period="1y",  interval="1d",  auto_adjust=False)
+            h4    = ticker.history(period="2y",  interval="1wk", auto_adjust=False)
+            h1    = ticker.history(period="60d", interval="1d",  auto_adjust=False)
 
         return FetchResult(
             symbol=yf_symbol,
@@ -84,9 +89,10 @@ class USDataService:
     def fetch(self, symbol: str) -> FetchResult:
         ticker = yf.Ticker(symbol)
 
-        daily = ticker.history(period="6mo", interval="1d", auto_adjust=False)
-        h4 = ticker.history(period="60d", interval="1h", auto_adjust=False)
-        h1 = ticker.history(period="30d", interval="1h", auto_adjust=False)
+        # 1y 確保有足夠資料計算 EMA200
+        daily = ticker.history(period="1y",  interval="1d", auto_adjust=False)
+        h4    = ticker.history(period="60d", interval="1h", auto_adjust=False)
+        h1    = ticker.history(period="30d", interval="1h", auto_adjust=False)
 
         return FetchResult(
             symbol=symbol,
