@@ -771,7 +771,10 @@ def is_stock_related(text):
         "閃崩", "融券", "借券", "除權", "除息", "配股", "配息", "新股",
         "IPO", "下市", "上市", "公告", "財報", "營收", "EPS", "本益比",
         "股價", "股數", "市值", "成交", "掛單", "委買", "委賣", "量能",
-        "波動", "風險", "報酬", "風報", "進場", "出場", "加碼", "減碼"
+        "波動", "風險", "報酬", "風報", "進場", "出場", "加碼", "減碼",
+        "美股", "台股", "美國股市", "台灣股市", "推薦", "建議", "挑選",
+        "選股", "幫我", "掃描", "哪些", "什麼股", "哪支", "適合", "能買",
+        "可以買", "值得買", "現在買", "掃一下", "scan", "screen",
     ]
 
     text_lower = text.lower()
@@ -848,6 +851,53 @@ def get_stock_snapshot(symbol):
         return None, str(e)
     except Exception as e:
         return None, str(e)
+
+_US_SCAN_LIST = [
+    "NVDA", "TSLA", "AAPL", "AMD", "META", "MSFT", "AMZN",
+    "PLTR", "AVGO", "SMCI", "COIN", "NFLX", "NOW", "CRWD",
+    "PANW", "MSTR", "GOOGL", "UBER", "ARM",
+]
+_TW_SCAN_LIST = ["2330", "2317", "2454", "2308", "3008", "2382", "2412", "2303"]
+
+
+def scan_market_sync(market: str = "US") -> list[dict]:
+    """
+    同步掃描 watchlist，回傳有進場機會（High / Watch）的 setup 清單。
+    設計為在 run_in_executor 中呼叫。
+    """
+    watchlist = _US_SCAN_LIST if market == "US" else _TW_SCAN_LIST
+    results: list[dict] = []
+
+    mkt_filter = get_market_filter()
+
+    for symbol in watchlist:
+        try:
+            result = _router.route(symbol)
+            if result.daily.empty or result.h4.empty or result.h1.empty:
+                continue
+            daily = add_indicators(result.daily).dropna()
+            h4    = add_indicators(result.h4).dropna()
+            h1    = add_indicators(result.h1).dropna()
+            if len(daily) < 20:
+                continue
+            setup = detect_swing_setup(daily, h4, h1, mkt_filter)
+            rating = setup.get("rating", "").lower()
+            if rating.startswith("high") or "watch" in rating:
+                results.append({
+                    "symbol":        result.symbol,
+                    "rating":        setup["rating"],
+                    "rr_ratio":      setup.get("rr_ratio", 0),
+                    "setup_type":    setup.get("setup_type", "N/A"),
+                    "planned_entry": setup.get("planned_entry", 0),
+                    "stop_loss":     setup.get("stop_loss", 0),
+                    "target_1":      setup.get("target_1", 0),
+                })
+        except Exception:
+            continue
+
+    results.sort(key=lambda x: x["rr_ratio"], reverse=True)
+    return results[:6]
+
 
 def is_industry_question(text):
     keywords = [

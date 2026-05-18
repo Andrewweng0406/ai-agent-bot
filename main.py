@@ -23,6 +23,7 @@ from agent import (
     analyze_trade_history,
     calc_position_size,
     format_position_size,
+    scan_market_sync,
 )
 from alerts import add_alert, remove_alert, format_user_alerts
 from market_router import MarketRouter
@@ -298,6 +299,37 @@ RSI：{setup["rsi"]:.2f}
         await push_line(user_id, "⚠️ 出場分析時發生錯誤，請稍後再試。")
 
 
+async def run_scan_analysis(market: str, user_id: str) -> None:
+    """掃描 watchlist，回傳高勝率 Setup 清單。"""
+    try:
+        loop    = asyncio.get_event_loop()
+        results = await loop.run_in_executor(None, scan_market_sync, market)
+        mkt_label = "美股" if market == "US" else "台股"
+
+        if not results:
+            msg = (
+                f"🔍 {mkt_label} 掃描完成\n\n"
+                "目前 watchlist 中無高勝率 Setup，\n"
+                "建議等待更好的進場時機或大盤轉強後再掃描。"
+            )
+        else:
+            lines = [f"🔍 {mkt_label} 高勝率 Setup — 今日機會：\n"]
+            for r in results:
+                badge = "🟢" if r["rating"].lower().startswith("high") else "🟡"
+                lines.append(
+                    f"{badge} {r['symbol']}  {r['setup_type']}\n"
+                    f"   進場 {r['planned_entry']:.2f} | 目標 {r['target_1']:.2f} | {r['rr_ratio']:.1f}R\n"
+                )
+            lines.append("👆 輸入股票代號查看完整分析（例：NVDA）")
+            msg = "\n".join(lines)
+
+        await push_line(user_id, msg)
+
+    except Exception as e:
+        print(f"❌ Scan 失敗: {e}")
+        await push_line(user_id, "⚠️ 掃描時發生錯誤，請稍後再試。")
+
+
 async def run_chat_response(user_msg: str, user_id: str) -> None:
     """
     非代號的股票相關問題 → gpt-4o-mini 輕量回覆。
@@ -311,9 +343,16 @@ async def run_chat_response(user_msg: str, user_id: str) -> None:
                 {
                     "role": "system",
                     "content": (
-                        "你是 WengStock AI，專業的美股 Swing Trading 助理。"
-                        "只回答股票和交易相關問題。短、直接、有交易員感。"
-                        "用繁體中文回答。不保證獲利。"
+                        "你是 WengStock AI，專業的美股 Swing Trading 助理。\n"
+                        "只回答股票和交易相關問題。短、直接、有交易員感。用繁體中文回答。\n\n"
+                        "【重要行為規則】\n"
+                        "1. 如果用戶問「推薦股票」、「幫我挑股」、「哪些可以買」、「掃描」，\n"
+                        "   請回覆：「請輸入 /scan 美股 或 /scan 台股，我會掃描 watchlist 找出今日高勝率機會 🔍」\n"
+                        "2. 如果用戶問「為什麼都是 No Trade」，\n"
+                        "   請解釋：「No Trade 代表目前這檔股票不符合高勝率進場條件（可能超漲、大盤弱、風報比不足）。\n"
+                        "   可輸入 /scan 美股 讓系統掃描整個 watchlist，找出目前有機會的標的。」\n"
+                        "3. 不要給一般股市教育或理財建議，不要提經紀商帳戶問題。\n"
+                        "4. 不保證獲利，注意風險。"
                     ),
                 },
                 {"role": "user", "content": user_msg},
@@ -539,6 +578,16 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
                 await reply_line(reply_token, remove_alert(user_id, sym))
             continue
 
+        # ── /scan [美股|台股|US|TW] → 掃描 watchlist
+        if lower.startswith("/scan") or lower in ["scan", "掃描", "掃一下"]:
+            parts = lower.split()
+            mkt = "TW" if (len(parts) > 1 and parts[1] in ["台股", "tw", "台灣"]) else "US"
+            mkt_label = "台股" if mkt == "TW" else "美股"
+            await reply_line(reply_token,
+                f"🔍 正在掃描 {mkt_label} watchlist，找出今日高勝率機會，請稍候約 30 秒...")
+            background_tasks.add_task(run_scan_analysis, mkt, user_id)
+            continue
+
         # ── 非股票問題 → 拒絕
         if not is_stock_related(user_msg):
             await reply_line(
@@ -574,6 +623,10 @@ def _help_text() -> str:
 
 📊 完整分析：直接輸入股票代號
   NVDA / TSLA / AMD / 2330
+
+🔍 掃描推薦（幫你找今日機會）：
+  /scan 美股
+  /scan 台股
 
 📤 出場分析（手上有股票要不要賣）：
   /exit NVDA
