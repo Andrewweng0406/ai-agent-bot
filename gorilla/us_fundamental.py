@@ -77,10 +77,26 @@ async def _get_cik(ticker: str, client: httpx.AsyncClient) -> int:
 # XBRL 解析工具
 # ─────────────────────────────────────────────
 
+def _period_days(entry: dict) -> int:
+    """Return the number of calendar days covered by this entry (start → end)."""
+    from datetime import datetime
+    s = entry.get("start", "")
+    e = entry.get("end", "")
+    if not s or not e:
+        return 9999
+    try:
+        return (datetime.strptime(e, "%Y-%m-%d") - datetime.strptime(s, "%Y-%m-%d")).days
+    except Exception:
+        return 9999
+
+
 def _extract_quarterly(facts: dict, keys: list[str]) -> list[dict]:
     """
     從 XBRL companyfacts 抓指定欄位的季度數據。
     回傳依 end date 降序排列（最新季度在前）的 list。
+
+    EDGAR 同一 fp=Q3 期間可能同時存在累計 YTD（~270天）和單季（~90天）兩筆，
+    需選較短期間（單季）才能正確計算 TTM / YoY。
     """
     gaap = facts.get("facts", {}).get("us-gaap", {})
     for key in keys:
@@ -95,12 +111,21 @@ def _extract_quarterly(facts: dict, keys: list[str]) -> list[dict]:
             ]
             if not quarterly:
                 continue
-            # 同一期間保留最新申報版本
+            # 同一 end date：優先保留期間最短的那筆（單季 ~90 天 > YTD ~270 天）
+            # 若期間相同則保留最新申報版本（filed 較晚）
             seen: dict[str, dict] = {}
             for v in quarterly:
                 end = v["end"]
-                if end not in seen or v["filed"] > seen[end]["filed"]:
+                if end not in seen:
                     seen[end] = v
+                else:
+                    prev = seen[end]
+                    v_days    = _period_days(v)
+                    prev_days = _period_days(prev)
+                    if v_days < prev_days:
+                        seen[end] = v
+                    elif v_days == prev_days and v.get("filed", "") > prev.get("filed", ""):
+                        seen[end] = v
             result = sorted(seen.values(), key=lambda x: x["end"], reverse=True)
             if len(result) >= 4:
                 return result

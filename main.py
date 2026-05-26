@@ -934,14 +934,18 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
                     "格式：/gexit 股票代號\n\n例如：/gexit NVDA")
             continue
 
-        # ── /gpositions → 查看大猩猩持倉
+        # ── /gpositions → 查看大猩猩持倉（yfinance 同步，丟 executor）
         if lower in ["/gpositions", "gpositions", "持倉", "大猩猩持倉"]:
-            await reply_line(reply_token, format_positions(user_id))
+            loop = asyncio.get_event_loop()
+            pos_text = await loop.run_in_executor(None, format_positions, user_id)
+            await reply_line(reply_token, pos_text)
             continue
 
-        # ── /gmarket → 大盤風向球
+        # ── /gmarket → 大盤風向球（yfinance 同步，丟 executor）
         if lower in ["/gmarket", "gmarket", "大盤", "市場狀態"]:
-            await reply_line(reply_token, format_market_status())
+            loop = asyncio.get_event_loop()
+            mkt_text = await loop.run_in_executor(None, format_market_status)
+            await reply_line(reply_token, mkt_text)
             continue
 
         # ── 非股票問題 → 拒絕
