@@ -31,6 +31,13 @@ from watchlist import (
     add_watch, remove_watch, format_user_watchlist,
     is_new_user, mark_user_seen,
 )
+from gorilla.screener import screen_us, screen_tw, run_daily_scan
+from gorilla.position_manager import (
+    record_entry, close_position, format_positions,
+    check_positions_sync, get_all_user_ids,
+)
+from gorilla.gorilla_flex import build_gorilla_flex
+from gorilla.market_filter import format_market_status
 from market_router import MarketRouter
 from models import watchlist_router, create_tables
 from flex_builder import build_stock_report_flex
@@ -339,6 +346,70 @@ RSI：{setup["rsi"]:.2f}
     except Exception as e:
         print(f"❌ 出場分析失敗 [{symbol}]: {e}")
         await push_line(user_id, "⚠️ 出場分析時發生錯誤，請稍後再試。")
+
+
+async def run_gorilla_diagnosis(symbol: str, user_id: str) -> None:
+    """大猩猩即時診斷（單支股票）"""
+    try:
+        is_tw  = symbol.isdigit()
+        result = await (screen_tw(symbol) if is_tw else screen_us(symbol))
+        sig    = "BUY" if result.get("pass") else "NO_PASS"
+        flex   = build_gorilla_flex(sig, result)
+        await push_flex(user_id, flex)
+        # 補充文字說明
+        if result.get("pass"):
+            passes = "\n".join(f"✅ {p}" for p in result.get("passes", []))
+            await push_line(user_id,
+                f"🦍 {symbol} 通過大猩猩篩選！\n\n{passes}\n\n"
+                f"建議以現價 {result['price']:.2f} 試單 5%，\n"
+                f"停損設在 {result['price'] * 0.925:.2f}（-7.5%）\n\n"
+                f"記錄進場：/gentry {symbol} {result['price']:.2f}")
+        else:
+            fails = "\n".join(f"❌ {f}" for f in result.get("fails", []))
+            passes = "\n".join(f"✅ {p}" for p in result.get("passes", []))
+            await push_line(user_id,
+                f"🦍 {symbol} 目前不符合大猩猩條件\n\n{fails}\n\n已通過：\n{passes}")
+    except Exception as e:
+        print(f"❌ Gorilla 診斷失敗 [{symbol}]: {e}")
+        await push_line(user_id, "⚠️ 大猩猩診斷失敗，請稍後再試。")
+
+
+async def run_gorilla_scan(market: str, user_id: str) -> None:
+    """每日大猩猩掃描結果推播"""
+    try:
+        result = await run_daily_scan(market)
+        flag   = "🇺🇸" if market == "US" else "🇹🇼"
+        label  = "美股" if market == "US" else "台股"
+
+        if not result["market_safe"]:
+            await push_line(user_id,
+                f"🚫 {flag} {label}大盤偏弱，大猩猩策略暫停買進\n\n"
+                f"{result['market_detail']}\n\n"
+                "等大盤重新站上均線再掃描。")
+            return
+
+        picks = result.get("picks", [])
+        if not picks:
+            await push_line(user_id,
+                f"🦍 {flag} {label}大猩猩掃描完成\n\n"
+                "今日 watchlist 中無完全符合條件的標的。\n"
+                "大盤安全但個股條件未到，繼續等待。")
+            return
+
+        # 推播前三名
+        for pick in picks[:3]:
+            flex = build_gorilla_flex("BUY", pick)
+            await push_flex(user_id, flex)
+
+        names = "、".join(p["ticker"] for p in picks)
+        await push_line(user_id,
+            f"🦍 {flag} {label}今日大猩猩精選：{names}\n"
+            f"共 {len(picks)} 支通過篩選，以上為前 3 名。\n\n"
+            "輸入代號查看完整 Swing 分析（如：NVDA）")
+
+    except Exception as e:
+        print(f"❌ Gorilla scan 失敗: {e}")
+        await push_line(user_id, "⚠️ 掃描時發生錯誤，請稍後再試。")
 
 
 async def run_morning_brief(user_id: str) -> None:
@@ -795,14 +866,82 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
                     "請輸入兩個股票代號 📊\n\n例如：/compare NVDA AMD")
             continue
 
-        # ── /scan [美股|台股|US|TW] → 掃描 watchlist
+        # ── /gorilla SYMBOL → 大猩猩診斷（背景）
+        if lower.startswith("/gorilla ") or lower.startswith("gorilla "):
+            parts = user_msg.split()
+            if len(parts) >= 2:
+                g_sym = parts[1].upper()
+                flag  = "🇹🇼" if g_sym.isdigit() else "🇺🇸"
+                await reply_line(reply_token,
+                    f"🦍 大猩猩診斷 {flag} {g_sym} 中...\n"
+                    "正在抓基本面 + 技術面數據，請稍候約 20 秒。")
+                background_tasks.add_task(run_gorilla_diagnosis, g_sym, user_id)
+            else:
+                await reply_line(reply_token,
+                    "請輸入股票代號 🦍\n\n"
+                    "美股：/gorilla NVDA\n"
+                    "台股：/gorilla 2330")
+            continue
+
+        # ── /scan [gorilla] [美股|台股|US|TW] → 掃描 watchlist
         if lower.startswith("/scan") or lower in ["scan", "掃描", "掃一下"]:
             parts = lower.split()
-            mkt = "TW" if (len(parts) > 1 and parts[1] in ["台股", "tw", "台灣"]) else "US"
-            mkt_label = "台股" if mkt == "TW" else "美股"
-            await reply_line(reply_token,
-                f"🔍 正在掃描 {mkt_label} watchlist，找出今日高勝率機會，請稍候約 30 秒...")
-            background_tasks.add_task(run_scan_analysis, mkt, user_id)
+            if len(parts) > 1 and parts[1] == "gorilla":
+                mkt   = "TW" if (len(parts) > 2 and parts[2] in ["台股", "tw", "台灣"]) else "US"
+                label = "台股" if mkt == "TW" else "美股"
+                await reply_line(reply_token,
+                    f"🦍 大猩猩策略掃描 {label} 中...\n"
+                    "CAN SLIM 篩選約 30~60 秒，請稍候。")
+                background_tasks.add_task(run_gorilla_scan, mkt, user_id)
+            else:
+                mkt       = "TW" if (len(parts) > 1 and parts[1] in ["台股", "tw", "台灣"]) else "US"
+                mkt_label = "台股" if mkt == "TW" else "美股"
+                await reply_line(reply_token,
+                    f"🔍 正在掃描 {mkt_label} watchlist，找出今日高勝率機會，請稍候約 30 秒...")
+                background_tasks.add_task(run_scan_analysis, mkt, user_id)
+            continue
+
+        # ── /gentry SYMBOL PRICE → 記錄大猩猩進場
+        if lower.startswith("/gentry ") or lower.startswith("gentry "):
+            parts = user_msg.split()
+            if len(parts) >= 3:
+                g_sym = parts[1].upper()
+                try:
+                    entry_price = float(parts[2])
+                    is_tw       = g_sym.isdigit()
+                    msg         = record_entry(user_id, g_sym, entry_price, is_tw)
+                    await reply_line(reply_token, msg)
+                except ValueError:
+                    await reply_line(reply_token,
+                        "請輸入正確的進場價格 💰\n\n"
+                        "例如：/gentry NVDA 850.00\n"
+                        "      /gentry 2330 980")
+            else:
+                await reply_line(reply_token,
+                    "格式：/gentry 股票代號 進場價格\n\n"
+                    "例如：/gentry NVDA 850\n"
+                    "      /gentry 2330 980")
+            continue
+
+        # ── /gexit SYMBOL → 大猩猩標記出場
+        if lower.startswith("/gexit ") or lower.startswith("gexit "):
+            parts = user_msg.split()
+            if len(parts) >= 2:
+                g_sym = parts[1].upper()
+                await reply_line(reply_token, close_position(user_id, g_sym))
+            else:
+                await reply_line(reply_token,
+                    "格式：/gexit 股票代號\n\n例如：/gexit NVDA")
+            continue
+
+        # ── /gpositions → 查看大猩猩持倉
+        if lower in ["/gpositions", "gpositions", "持倉", "大猩猩持倉"]:
+            await reply_line(reply_token, format_positions(user_id))
+            continue
+
+        # ── /gmarket → 大盤風向球
+        if lower in ["/gmarket", "gmarket", "大盤", "市場狀態"]:
+            await reply_line(reply_token, format_market_status())
             continue
 
         # ── 非股票問題 → 拒絕
@@ -880,6 +1019,18 @@ def _help_text() -> str:
   /alert NVDA 850
   /myalerts        查看我的警報
   /cancelalert NVDA 取消警報
+
+🦍 大猩猩策略（CAN SLIM 成長選股）：
+  /gorilla NVDA       診斷單支股票
+  /gorilla 2330       台股診斷
+  /scan gorilla       掃描美股精選
+  /scan gorilla 台股  掃描台股精選
+  /gmarket            大盤風向球
+
+🦍 大猩猩持倉管理：
+  /gentry NVDA 850  記錄進場（自動設停損）
+  /gexit NVDA       標記出場
+  /gpositions       查看所有持倉狀態
 
 💬 聊天提問：
   TSLA 現在能追嗎？

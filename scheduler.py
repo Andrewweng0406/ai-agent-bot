@@ -29,6 +29,9 @@ from tenacity import (
     before_sleep_log,
 )
 from watchlist import get_watchlist_by_market, get_all_symbols_by_market, get_users_tracking
+from gorilla.screener import run_daily_scan
+from gorilla.position_manager import check_positions_sync, get_all_user_ids
+from gorilla.gorilla_flex import build_gorilla_flex
 
 # ─────────────────────────────────────────────
 # Logging 設定
@@ -258,9 +261,30 @@ async def send_line_push(line_user_id: str, content: str | dict) -> None:
     """
     推播 LINE 訊息給指定用戶。
     content 為 str 時發純文字；為 dict 時視為 Flex Message payload。
-    【待替換】串接真實 LINE Push Message API。
     """
-    log.info(f"[LINE PUSH] → {line_user_id[:8]}... | {str(content)[:80]}...")
+    line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
+    if not line_token:
+        log.warning("[LINE PUSH] LINE_CHANNEL_ACCESS_TOKEN 未設定，略過推播")
+        return
+
+    if isinstance(content, str):
+        messages = [{"type": "text", "text": content[:4900]}]
+    else:
+        messages = [content]
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            resp = await http.post(
+                "https://api.line.me/v2/bot/message/push",
+                headers={"Authorization": f"Bearer {line_token}"},
+                json={"to": line_user_id, "messages": messages},
+            )
+            if resp.status_code == 200:
+                log.info(f"[LINE PUSH] ✅ → {line_user_id[:8]}...")
+            else:
+                log.warning(f"[LINE PUSH] 失敗 [{resp.status_code}]: {resp.text[:200]}")
+    except Exception as e:
+        log.error(f"[LINE PUSH] 例外: {e}")
 
 
 @retry(
@@ -641,6 +665,146 @@ async def _task_marketing_post(market: str) -> None:
 
 
 # ─────────────────────────────────────────────
+# 大猩猩策略排程任務
+# ─────────────────────────────────────────────
+
+async def _task_gorilla_scan_us() -> None:
+    """每日美股大猩猩掃描（收盤後 22:30 ET）"""
+    log.info("🦍 [大猩猩] 美股掃描 — 開始")
+    try:
+        result   = await run_daily_scan("US")
+        user_ids = get_all_user_ids()
+        if not user_ids:
+            log.info("🦍 [大猩猩] 無追蹤用戶，跳過")
+            return
+
+        if not result["market_safe"]:
+            msg = (
+                f"🦍🇺🇸 美股大盤偏弱，大猩猩策略暫停買進\n\n"
+                f"{result['market_detail']}\n\n"
+                "等大盤重新站上均線再掃描。"
+            )
+            for uid in user_ids:
+                await send_line_push(uid, msg)
+                await asyncio.sleep(0.3)
+            return
+
+        picks = result.get("picks", [])
+        if not picks:
+            msg = (
+                "🦍🇺🇸 美股大猩猩掃描完成\n"
+                "今日無完全符合 CAN SLIM 條件的標的。\n"
+                "大盤安全，個股條件未到，繼續等待。"
+            )
+            for uid in user_ids:
+                await send_line_push(uid, msg)
+                await asyncio.sleep(0.3)
+        else:
+            names = "、".join(p["ticker"] for p in picks[:5])
+            summary = (
+                f"🦍🇺🇸 今日美股大猩猩精選：{names}\n"
+                f"共 {len(picks)} 支通過 CAN SLIM 篩選\n\n"
+                "輸入 /gorilla 代號 查看完整診斷"
+            )
+            for uid in user_ids:
+                for pick in picks[:3]:
+                    flex = build_gorilla_flex("BUY", pick)
+                    await send_line_push(uid, flex)
+                    await asyncio.sleep(0.3)
+                await send_line_push(uid, summary)
+                await asyncio.sleep(0.3)
+
+        log.info(f"🦍 [大猩猩] 美股掃描完成，{len(picks)} 支精選，推播 {len(user_ids)} 位用戶")
+    except Exception as e:
+        log.error(f"🦍 [大猩猩] 美股掃描失敗: {e}")
+
+
+async def _task_gorilla_scan_tw() -> None:
+    """每日台股大猩猩掃描（收盤後 14:30 台北）"""
+    log.info("🦍 [大猩猩] 台股掃描 — 開始")
+    try:
+        result   = await run_daily_scan("TW")
+        user_ids = get_all_user_ids()
+        if not user_ids:
+            log.info("🦍 [大猩猩] 無追蹤用戶，跳過")
+            return
+
+        if not result["market_safe"]:
+            msg = (
+                f"🦍🇹🇼 台股大盤偏弱，大猩猩策略暫停買進\n\n"
+                f"{result['market_detail']}\n\n"
+                "等大盤重新站上均線再掃描。"
+            )
+            for uid in user_ids:
+                await send_line_push(uid, msg)
+                await asyncio.sleep(0.3)
+            return
+
+        picks = result.get("picks", [])
+        if not picks:
+            msg = (
+                "🦍🇹🇼 台股大猩猩掃描完成\n"
+                "今日無完全符合條件的標的。\n"
+                "大盤安全，個股條件未到，繼續等待。"
+            )
+            for uid in user_ids:
+                await send_line_push(uid, msg)
+                await asyncio.sleep(0.3)
+        else:
+            names = "、".join(p["ticker"] for p in picks[:5])
+            summary = (
+                f"🦍🇹🇼 今日台股大猩猩精選：{names}\n"
+                f"共 {len(picks)} 支通過篩選\n\n"
+                "輸入 /gorilla 代號 查看完整診斷"
+            )
+            for uid in user_ids:
+                for pick in picks[:3]:
+                    flex = build_gorilla_flex("BUY", pick)
+                    await send_line_push(uid, flex)
+                    await asyncio.sleep(0.3)
+                await send_line_push(uid, summary)
+                await asyncio.sleep(0.3)
+
+        log.info(f"🦍 [大猩猩] 台股掃描完成，{len(picks)} 支精選，推播 {len(user_ids)} 位用戶")
+    except Exception as e:
+        log.error(f"🦍 [大猩猩] 台股掃描失敗: {e}")
+
+
+async def _task_gorilla_position_check() -> None:
+    """每日大猩猩持倉風控（08:00 台北，開盤前提醒）"""
+    log.info("🦍 [大猩猩] 持倉風控檢查 — 開始")
+    user_ids = get_all_user_ids()
+    if not user_ids:
+        return
+
+    alert_type_to_signal = {
+        "STOP_LOSS":   "STOP_LOSS",
+        "TAKE_PROFIT": "TAKE_PROFIT",
+        "ADD":         "ADD",
+    }
+
+    for uid in user_ids:
+        try:
+            loop   = asyncio.get_event_loop()
+            alerts = await loop.run_in_executor(None, check_positions_sync, uid)
+            for alert in alerts:
+                sig = alert_type_to_signal.get(alert.get("type", ""), "DIAGNOSIS")
+                flex = build_gorilla_flex(sig, {
+                    "ticker": alert["ticker"],
+                    "price":  alert["price"],
+                    "is_tw":  str(alert["ticker"]).isdigit(),
+                })
+                await send_line_push(uid, flex)
+                await asyncio.sleep(0.2)
+                await send_line_push(uid, alert["msg"])
+                await asyncio.sleep(0.3)
+        except Exception as e:
+            log.error(f"🦍 [大猩猩] 持倉檢查失敗 [{uid}]: {e}")
+
+    log.info(f"🦍 [大猩猩] 持倉風控完成，掃描 {len(user_ids)} 位用戶")
+
+
+# ─────────────────────────────────────────────
 # APScheduler 同步包裝（Bridge sync → async）
 # ─────────────────────────────────────────────
 
@@ -785,6 +949,37 @@ def build_scheduler() -> BackgroundScheduler:
                     timezone="America/New_York"),
         id="settle_us",
         name="📊 美股勝率結算",
+        replace_existing=True,
+    )
+
+    # ── 大猩猩策略排程（CAN SLIM 選股）────────────────────────
+
+    # 美股大猩猩掃描（週一~五 22:30 ET = 收盤後 6H，等財報數據穩定）
+    sch.add_job(
+        lambda: _run_async(_task_gorilla_scan_us()),
+        CronTrigger(day_of_week="mon-fri", hour=22, minute=30,
+                    timezone="America/New_York"),
+        id="gorilla_scan_us",
+        name="🦍 美股大猩猩掃描",
+        replace_existing=True,
+    )
+
+    # 台股大猩猩掃描（週一~五 14:30 台北 = 收盤後 30min）
+    sch.add_job(
+        lambda: _run_async(_task_gorilla_scan_tw()),
+        CronTrigger(day_of_week="mon-fri", hour=14, minute=30,
+                    timezone="Asia/Taipei"),
+        id="gorilla_scan_tw",
+        name="🦍 台股大猩猩掃描",
+        replace_existing=True,
+    )
+
+    # 大猩猩持倉風控（每日 08:00 台北，兩個市場開盤前各提醒一次）
+    sch.add_job(
+        lambda: _run_async(_task_gorilla_position_check()),
+        CronTrigger(hour=8, minute=0, timezone="Asia/Taipei"),
+        id="gorilla_position_check",
+        name="🦍 大猩猩持倉風控",
         replace_existing=True,
     )
 
