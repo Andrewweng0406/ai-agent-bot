@@ -158,11 +158,47 @@ async def run_swing_analysis(symbol: str, user_id: str) -> None:
         flex_msg = build_stock_report_flex(report_json)
         await push_flex(user_id, flex_msg)
 
+        # ── No Trade 時，給出回踩目標與一鍵設警報
+        rating = setup.get("rating", "").lower()
+        if "no" in rating or "🔴" in setup.get("rating", ""):
+            sym        = fetch_result.symbol
+            entry_low  = setup.get("entry_zone_low", 0)
+            entry_high = setup.get("entry_zone_high", 0)
+            planned    = setup.get("planned_entry", entry_low)
+            overheat   = setup.get("overheat_alert", False)
+            storm      = setup.get("storm_mode", False)
+            dev_pct    = setup.get("deviation_from_ma20_pct", 0)
+
+            if storm:
+                tip = (
+                    f"⛈️ {sym} 現在大盤是風暴模式，整體市場不宜進場。\n"
+                    "等大盤重新站上 MA200 再考慮。"
+                )
+            elif overheat:
+                tip = (
+                    f"🔥 {sym} 目前超漲 {dev_pct:.1f}%，需要等回踩。\n\n"
+                    f"📍 等待區：{entry_low:.2f} – {entry_high:.2f}\n"
+                    f"🎯 計畫進場：{planned:.2f}\n\n"
+                    f"⚡ 一鍵設警報（到價通知你）：\n"
+                    f"/alert {sym} {planned:.2f}"
+                )
+            else:
+                tip = (
+                    f"📍 {sym} 目前不符合進場條件。\n"
+                    f"等待回踩至 {entry_low:.2f} – {entry_high:.2f} 再觀察。\n\n"
+                    f"⚡ 設警報：/alert {sym} {planned:.2f}"
+                )
+            await push_line(user_id, tip)
+
     except asyncio.TimeoutError:
         await push_line(user_id, "⚠️ 分析超時，請稍後再試。")
     except Exception as e:
-        print(f"❌ 背景分析失敗 [{symbol}]: {e}")
-        await push_line(user_id, f"⚠️ 分析時發生錯誤，請稍後再試。")
+        err = str(e).lower()
+        if "rate" in err or "429" in err:
+            await push_line(user_id, f"⚠️ 資料來源暫時忙碌，請 30 秒後再試一次。")
+        else:
+            print(f"❌ 背景分析失敗 [{symbol}]: {e}")
+            await push_line(user_id, f"⚠️ 分析時發生錯誤，請稍後再試。")
 
 
 async def run_size_analysis(symbol: str, account_size: float, user_id: str) -> None:
@@ -304,6 +340,53 @@ RSI：{setup["rsi"]:.2f}
         await push_line(user_id, "⚠️ 出場分析時發生錯誤，請稍後再試。")
 
 
+async def run_morning_brief(user_id: str) -> None:
+    """
+    根據用戶自選股生成個人化盤前簡報。
+    沒有自選股則掃描美股 watchlist 給通用版。
+    """
+    try:
+        from watchlist import get_user_watchlist
+        stocks = get_user_watchlist(user_id)
+        is_personal = bool(stocks)
+
+        if not stocks:
+            # 沒有自選股 → 用預設美股清單
+            stocks = ["NVDA", "TSLA", "AAPL", "AMD", "META", "QQQ", "SPY"]
+
+        stock_list = ", ".join(stocks)
+        label = "個人自選股" if is_personal else "熱門美股"
+
+        prompt = (
+            f"{'美股' if not any(s.isdigit() for s in stocks) else '台股'}盤前簡報\n"
+            f"{label}：{stock_list}\n\n"
+            "請提供：\n"
+            "1. 今日大盤方向（QQQ/SPY/加權指數）\n"
+            "2. 各股盤前動能簡評（一行一支）\n"
+            "3. 今日最值得關注的 1–2 支與理由\n"
+            "4. 風險提示（若大盤過熱或有重大事件）\n\n"
+            "語氣簡潔直接，適合手機閱讀，繁體中文，重視風控。"
+        )
+
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0.4,
+            max_tokens=600,
+            messages=[
+                {"role": "system", "content": "你是 WengStock AI 盤前分析助理，專業、直接、重視風險。"},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        report = response.choices[0].message.content
+
+        header = "📈 個人盤前簡報\n" if is_personal else "📈 盤前簡報（加入自選股可個人化：/watch NVDA）\n"
+        await push_line(user_id, f"{header}\n{report}")
+
+    except Exception as e:
+        print(f"❌ 盤前簡報失敗 [{user_id}]: {e}")
+        await push_line(user_id, "⚠️ 盤前簡報生成失敗，請稍後再試。")
+
+
 async def run_scan_analysis(market: str, user_id: str) -> None:
     """掃描 watchlist，回傳高勝率 Setup 清單。"""
     try:
@@ -314,8 +397,13 @@ async def run_scan_analysis(market: str, user_id: str) -> None:
         if not results:
             msg = (
                 f"🔍 {mkt_label} 掃描完成\n\n"
-                "目前 watchlist 中無高勝率 Setup，\n"
-                "建議等待更好的進場時機或大盤轉強後再掃描。"
+                "目前 watchlist 中無高勝率 Setup。\n"
+                "大多數標的可能處於超漲或大盤偏弱狀態。\n\n"
+                "💡 建議做法：\n"
+                "  1. 對感興趣的個股設回踩警報\n"
+                "     例：/alert NVDA 900\n"
+                "  2. 等大盤回測 MA20 後再掃描\n"
+                "  3. 現在抱現金休息也是一種策略 💰"
             )
         else:
             lines = [f"🔍 {mkt_label} 高勝率 Setup — 今日機會：\n"]
@@ -581,8 +669,8 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
             continue
 
         if user_msg.lower() in ["/morning", "morning"]:
-            await reply_line(reply_token, "📈 盤前簡報生成中，請稍候...")
-            # morning briefing 也可以丟背景，這裡略
+            await reply_line(reply_token, "📈 盤前簡報生成中，請稍候約 15 秒...")
+            background_tasks.add_task(run_morning_brief, user_id)
             continue
 
         # ── /exit SYMBOL → 出場分析（背景）
