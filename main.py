@@ -157,6 +157,7 @@ async def run_swing_analysis(symbol: str, user_id: str) -> None:
         }
         flex_msg = build_stock_report_flex(report_json)
         await push_flex(user_id, flex_msg)
+        await push_line(user_id, f"🤖 WengStock AI 分析：\n\n{report_text}")
 
         # ── No Trade 時，給出回踩目標與一鍵設警報
         rating = setup.get("rating", "").lower()
@@ -342,44 +343,61 @@ RSI：{setup["rsi"]:.2f}
 
 async def run_morning_brief(user_id: str) -> None:
     """
-    根據用戶自選股生成個人化盤前簡報。
-    沒有自選股則掃描美股 watchlist 給通用版。
+    根據用戶自選股生成個人化盤前簡報，附帶真實價格快照。
+    沒有自選股則用預設美股清單。
     """
     try:
         from watchlist import get_user_watchlist
         stocks = get_user_watchlist(user_id)
         is_personal = bool(stocks)
-
         if not stocks:
-            # 沒有自選股 → 用預設美股清單
             stocks = ["NVDA", "TSLA", "AAPL", "AMD", "META", "QQQ", "SPY"]
 
-        stock_list = ", ".join(stocks)
+        # 抓各股最新價格快照
+        loop = asyncio.get_event_loop()
+        snapshots = []
+        for sym in stocks:
+            try:
+                fr    = await loop.run_in_executor(None, router.route, sym)
+                daily = add_indicators(fr.daily).dropna()
+                if daily.empty:
+                    continue
+                d      = daily.iloc[-1]
+                price  = float(d["Close"])
+                ema20  = float(d.get("EMA20", 0))
+                rsi    = float(d.get("RSI", 0))
+                chg_pct = (price / float(daily.iloc[-2]["Close"]) - 1) * 100 if len(daily) > 1 else 0
+                snapshots.append(
+                    f"{sym}: ${price:.2f} ({chg_pct:+.1f}%) | EMA20={ema20:.2f} | RSI={rsi:.1f}"
+                )
+            except Exception:
+                continue
+
+        snapshot_text = "\n".join(snapshots) if snapshots else "（無法取得即時數據）"
         label = "個人自選股" if is_personal else "熱門美股"
 
         prompt = (
-            f"{'美股' if not any(s.isdigit() for s in stocks) else '台股'}盤前簡報\n"
-            f"{label}：{stock_list}\n\n"
-            "請提供：\n"
-            "1. 今日大盤方向（QQQ/SPY/加權指數）\n"
-            "2. 各股盤前動能簡評（一行一支）\n"
-            "3. 今日最值得關注的 1–2 支與理由\n"
-            "4. 風險提示（若大盤過熱或有重大事件）\n\n"
-            "語氣簡潔直接，適合手機閱讀，繁體中文，重視風控。"
+            f"盤前簡報 — {label}\n\n"
+            f"【今日各股即時快照】\n{snapshot_text}\n\n"
+            "請根據以上數據提供：\n"
+            "1. 大盤方向研判（看 SPY/QQQ/加權指數）\n"
+            "2. 各股今日重點（一行一支，指出機會或風險）\n"
+            "3. 最值得關注的 1–2 支與進場條件\n"
+            "4. 風險提示（RSI 過熱、距 EMA20 過遠等）\n\n"
+            "語氣簡潔直接，重視風控，繁體中文，適合手機閱讀。"
         )
 
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
             temperature=0.4,
-            max_tokens=600,
+            max_tokens=700,
             messages=[
-                {"role": "system", "content": "你是 WengStock AI 盤前分析助理，專業、直接、重視風險。"},
+                {"role": "system", "content": "你是 WengStock AI 盤前分析助理，根據即時數據給出專業判斷。"},
                 {"role": "user", "content": prompt},
             ],
         )
         report = response.choices[0].message.content
-
-        header = "📈 個人盤前簡報\n" if is_personal else "📈 盤前簡報（加入自選股可個人化：/watch NVDA）\n"
+        header = "📈 個人盤前簡報\n" if is_personal else "📈 盤前簡報（輸入 /watch NVDA 可個人化）\n"
         await push_line(user_id, f"{header}\n{report}")
 
     except Exception as e:
