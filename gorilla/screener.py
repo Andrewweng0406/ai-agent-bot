@@ -93,31 +93,49 @@ def _check_earnings(ticker: str) -> str | None:
     """
     回傳財報日期字串（如 "05/28"）若在未來 7 天內，否則回傳 None。
     只對美股做偵測，台股跳過（FinMind 財報日曆較難取得）。
+    yfinance calendar 可能是 dict 或 DataFrame，兩種都處理。
     """
     try:
-        t = yf.Ticker(ticker)
+        t   = yf.Ticker(ticker)
+        now = datetime.now()
 
-        # 優先用 earnings_dates（較準確）
-        ed = t.earnings_dates
-        if ed is not None and not ed.empty:
-            now = datetime.now()
-            for idx in ed.index:
-                dt = idx.to_pydatetime().replace(tzinfo=None)
-                days = (dt - now).days
-                if -1 <= days <= 7:
+        # 優先用 earnings_dates（需要 lxml，不一定安裝了）
+        try:
+            ed = t.earnings_dates
+            if ed is not None and not ed.empty:
+                for idx in ed.index:
+                    dt = idx.to_pydatetime().replace(tzinfo=None)
+                    if -1 <= (dt - now).days <= 7:
+                        return dt.strftime("%m/%d")
+        except Exception:
+            pass
+
+        # fallback: calendar（dict 或 DataFrame 都相容）
+        cal = t.calendar
+        if cal is None:
+            return None
+
+        # dict 格式（新版 yfinance）
+        if isinstance(cal, dict):
+            earn_dates = cal.get("Earnings Date", [])
+            if not isinstance(earn_dates, list):
+                earn_dates = [earn_dates]
+            for raw in earn_dates:
+                dt = datetime.combine(raw, datetime.min.time()) if not isinstance(raw, datetime) else raw
+                dt = dt.replace(tzinfo=None)
+                if -1 <= (dt - now).days <= 7:
                     return dt.strftime("%m/%d")
 
-        # fallback: calendar
-        cal = t.calendar
-        if cal is not None and not cal.empty:
+        # DataFrame 格式（舊版 yfinance）
+        elif hasattr(cal, "columns"):
             date_col = next((c for c in cal.columns if "Earnings" in c), None)
             if date_col:
                 for raw in cal[date_col].dropna():
                     dt = raw.to_pydatetime() if hasattr(raw, "to_pydatetime") else datetime.combine(raw, datetime.min.time())
                     dt = dt.replace(tzinfo=None)
-                    days = (dt - datetime.now()).days
-                    if -1 <= days <= 7:
+                    if -1 <= (dt - now).days <= 7:
                         return dt.strftime("%m/%d")
+
     except Exception:
         pass
     return None
