@@ -337,32 +337,44 @@ def db_get_users_tracking(stock_code: str) -> list[str]:
 def get_earnings_in_next_24h(symbols: list[str]) -> list[dict]:
     """
     檢查哪些股票在未來 24 小時內發布財報。
+    支援 yfinance 新版（dict）和舊版（DataFrame）兩種格式。
     回傳 [{"symbol": "NVDA", "earnings_date": datetime}, ...]
     """
     upcoming: list[dict] = []
-    now  = datetime.utcnow()
-    end  = now + timedelta(hours=24)
+    now = datetime.utcnow()
+    end = now + timedelta(hours=24)
 
     for sym in symbols:
         try:
-            cal = yf.Ticker(sym).calendar
-            if cal is None or cal.empty:
+            t   = yf.Ticker(sym)
+            cal = t.calendar
+            if cal is None:
                 continue
 
-            # yfinance calendar 的欄位因版本而異
-            date_col = next(
-                (c for c in cal.columns if "Earnings" in c),
-                None,
-            )
-            if not date_col:
-                continue
+            raw_dates: list = []
 
-            for raw_date in cal[date_col].dropna():
-                dt = (
-                    raw_date.to_pydatetime()
-                    if hasattr(raw_date, "to_pydatetime")
-                    else datetime.combine(raw_date, datetime.min.time())
-                )
+            # 新版 yfinance：calendar 是 dict
+            if isinstance(cal, dict):
+                earn_dates = cal.get("Earnings Date", [])
+                if not isinstance(earn_dates, list):
+                    earn_dates = [earn_dates]
+                raw_dates = earn_dates
+
+            # 舊版 yfinance：calendar 是 DataFrame
+            elif hasattr(cal, "columns"):
+                date_col = next((c for c in cal.columns if "Earnings" in c), None)
+                if date_col:
+                    raw_dates = list(cal[date_col].dropna())
+
+            for raw in raw_dates:
+                if hasattr(raw, "to_pydatetime"):
+                    dt = raw.to_pydatetime()
+                elif isinstance(raw, datetime):
+                    dt = raw
+                else:
+                    # date object → assume market close time (16:00 ET)
+                    dt = datetime.combine(raw, datetime.min.time().replace(hour=20))
+                dt = dt.replace(tzinfo=None)
                 if now <= dt <= end:
                     upcoming.append({"symbol": sym, "earnings_date": dt})
                     break

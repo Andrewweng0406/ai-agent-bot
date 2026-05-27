@@ -147,6 +147,9 @@ def get_market_filter():
         qqq = add_indicators(qqq).dropna()
         spy = add_indicators(spy).dropna()
 
+        if qqq.empty or spy.empty:
+            raise ValueError("QQQ/SPY 資料不足")
+
         q = qqq.iloc[-1]
         s = spy.iloc[-1]
 
@@ -226,6 +229,28 @@ def get_market_filter():
 
 
 def detect_swing_setup(daily, h4, h1, market):
+    # 防禦：dropna() 後可能為空，fallback 用 daily 代替
+    if daily.empty or len(daily) < 2:
+        return {
+            "price": 0, "ema20": 0, "ema50": 0, "rsi": 50, "atr": 0,
+            "vol_ratio": 0, "recent_high": 0, "recent_low": 0,
+            "score": -99, "rating": "🔴 No Trade", "bias": "資料不足",
+            "reasons": [], "warnings": ["資料不足，無法分析"],
+            "setup_type": "N/A", "market_status": market.get("status", "未知"),
+            "entry_zone_low": 0, "entry_zone_high": 0, "planned_entry": 0,
+            "distance_from_entry": 0, "stop_loss": 0, "stop_loss_price": 0,
+            "target_1": 0, "target_2": 0, "rr_ratio": 0,
+            "deviation_from_ma20_pct": 0, "overheat_alert": False,
+            "storm_mode": market.get("storm_mode", False),
+            "trailing_stop": 0, "exit_action": "hold",
+            "exit_message": "資料不足，無法分析",
+            "distribution_alert": False,
+        }
+    if h4.empty:
+        h4 = daily
+    if h1.empty:
+        h1 = daily
+
     d        = daily.iloc[-1]
     h4_last  = h4.iloc[-1]
     h1_last  = h1.iloc[-1]
@@ -923,7 +948,7 @@ def scan_market_sync(market: str = "US") -> list[dict]:
             daily = add_indicators(result.daily).dropna()
             h4    = add_indicators(result.h4).dropna()
             h1    = add_indicators(result.h1).dropna()
-            if len(daily) < 20:
+            if len(daily) < 20 or daily.empty:
                 continue
             setup = detect_swing_setup(daily, h4, h1, mkt_filter)
             rating = setup.get("rating", "").lower()
