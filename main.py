@@ -38,6 +38,7 @@ from gorilla.position_manager import (
 )
 from gorilla.gorilla_flex import build_gorilla_flex
 from gorilla.market_filter import format_market_status
+from gorilla.subscribe import subscribe as gorilla_subscribe, unsubscribe as gorilla_unsubscribe
 from market_router import MarketRouter
 from models import watchlist_router, create_tables
 from flex_builder import build_stock_report_flex
@@ -883,6 +884,21 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
                     "請輸入兩個股票代號 📊\n\n例如：/compare NVDA AMD")
             continue
 
+        # ── /gsubscribe → 訂閱大猩猩每日掃描推播
+        if lower.startswith("/gsubscribe") or lower == "gsubscribe":
+            mkt = "BOTH"
+            if "美股" in lower or " us" in lower:
+                mkt = "US"
+            elif "台股" in lower or " tw" in lower:
+                mkt = "TW"
+            await reply_line(reply_token, gorilla_subscribe(user_id, mkt))
+            continue
+
+        # ── /gunsubscribe → 取消訂閱
+        if lower.startswith("/gunsubscribe") or lower == "gunsubscribe":
+            await reply_line(reply_token, gorilla_unsubscribe(user_id))
+            continue
+
         # ── /gorilla SYMBOL → 大猩猩診斷（背景）
         if lower.startswith("/gorilla ") or lower.startswith("gorilla "):
             parts = user_msg.split()
@@ -1052,6 +1068,12 @@ def _help_text() -> str:
   /gentry NVDA 850  記錄進場（自動設停損）
   /gexit NVDA       標記出場
   /gpositions       查看所有持倉狀態
+
+🔔 大猩猩每日推播訂閱：
+  /gsubscribe       訂閱每日掃描（美股＋台股）
+  /gsubscribe 美股  只訂美股
+  /gsubscribe 台股  只訂台股
+  /gunsubscribe     取消訂閱
 
 💬 聊天提問：
   TSLA 現在能追嗎？

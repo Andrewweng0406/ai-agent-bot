@@ -32,6 +32,7 @@ from watchlist import get_watchlist_by_market, get_all_symbols_by_market, get_us
 from gorilla.screener import run_daily_scan
 from gorilla.position_manager import check_positions_sync, get_all_user_ids
 from gorilla.gorilla_flex import build_gorilla_flex
+from gorilla.subscribe import get_subscribers
 
 # ─────────────────────────────────────────────
 # Logging 設定
@@ -673,7 +674,8 @@ async def _task_gorilla_scan_us() -> None:
     log.info("🦍 [大猩猩] 美股掃描 — 開始")
     try:
         result   = await run_daily_scan("US")
-        user_ids = get_all_user_ids()
+        # 訂閱用戶 ∪ 有持倉用戶
+        user_ids = list(set(get_subscribers("US")) | set(get_all_user_ids()))
         if not user_ids:
             log.info("🦍 [大猩猩] 無追蹤用戶，跳過")
             return
@@ -724,7 +726,8 @@ async def _task_gorilla_scan_tw() -> None:
     log.info("🦍 [大猩猩] 台股掃描 — 開始")
     try:
         result   = await run_daily_scan("TW")
-        user_ids = get_all_user_ids()
+        # 訂閱用戶 ∪ 有持倉用戶
+        user_ids = list(set(get_subscribers("TW")) | set(get_all_user_ids()))
         if not user_ids:
             log.info("🦍 [大猩猩] 無追蹤用戶，跳過")
             return

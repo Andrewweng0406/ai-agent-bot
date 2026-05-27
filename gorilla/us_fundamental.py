@@ -20,6 +20,38 @@ FACTS_URL     = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 _CACHE_FILE   = Path(__file__).parent.parent / ".sec_cik_cache.json"
 _CACHE_TTL    = 86400 * 7  # 7 天更新一次 CIK 表
 
+# 基本面結果快取（24h TTL，避免每次掃描都打 EDGAR）
+_FUND_CACHE_FILE = Path(__file__).parent.parent / ".gorilla_fund_cache.json"
+_FUND_CACHE_TTL  = 86400  # 24 小時
+
+
+def _fund_cache_load() -> dict:
+    try:
+        return json.loads(_FUND_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _fund_cache_save(data: dict) -> None:
+    try:
+        _FUND_CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _fund_cache_get(ticker: str) -> dict | None:
+    cache = _fund_cache_load()
+    entry = cache.get(ticker.upper())
+    if entry and time.time() - entry.get("ts", 0) < _FUND_CACHE_TTL:
+        return entry["data"]
+    return None
+
+
+def _fund_cache_set(ticker: str, data: dict) -> None:
+    cache = _fund_cache_load()
+    cache[ticker.upper()] = {"ts": time.time(), "data": data}
+    _fund_cache_save(cache)
+
 # 常見 GAAP 欄位（按優先順序，找到第一個有數據的就用）
 _REVENUE_KEYS = [
     "RevenueFromContractWithCustomerExcludingAssessedTax",
@@ -161,11 +193,16 @@ def _ttm_growth(values: list[dict]) -> float | None:
 async def get_us_fundamentals(ticker: str) -> dict:
     """
     從 SEC EDGAR 抓美股季報數據並計算大猩猩策略所需指標。
+    結果快取 24 小時，加速批量掃描。
     Returns dict with keys:
         revenue_yoy, eps_yoy, gross_margin_current, gross_margin_change,
         eps_growth_rate (for PEG), peg, loss_to_profit, latest_quarter
         error (if failed)
     """
+    cached = _fund_cache_get(ticker)
+    if cached:
+        return cached
+
     async with httpx.AsyncClient(timeout=40) as client:
         try:
             cik  = await _get_cik(ticker, client)
@@ -205,7 +242,7 @@ async def get_us_fundamentals(ticker: str) -> dict:
     eps_growth_rate = _ttm_growth(eps_vals)
     peg             = _calc_peg(ticker, eps_growth_rate)
 
-    return {
+    result = {
         "revenue_yoy":          revenue_yoy,
         "eps_yoy":              eps_yoy,
         "gross_margin_current": gross_margin_current,
@@ -215,6 +252,8 @@ async def get_us_fundamentals(ticker: str) -> dict:
         "loss_to_profit":       loss_to_profit,
         "latest_quarter":       rev_vals[0]["end"] if rev_vals else None,
     }
+    _fund_cache_set(ticker, result)
+    return result
 
 
 def _calc_peg(ticker: str, eps_growth_rate: float | None) -> float | None:
