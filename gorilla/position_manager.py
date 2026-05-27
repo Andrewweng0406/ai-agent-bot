@@ -223,4 +223,9 @@ def check_positions_sync(user_id: str) -> list[dict]:
 
 
 def get_all_user_ids() -> list[str]:
-    return [uid for uid in _load().keys()]
+    """只回傳有至少一筆 open 持倉的用戶（排除測試資料或全部已出場的用戶）。"""
+    data = _load()
+    return [
+        uid for uid, positions in data.items()
+        if any(p.get("status") == "open" for p in positions.values())
+    ]

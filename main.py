@@ -884,7 +884,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
             continue
 
         # ── /scan [gorilla] [美股|台股|US|TW] → 掃描 watchlist
-        if lower.startswith("/scan") or lower in ["scan", "掃描", "掃一下"]:
+        if lower.startswith("/scan") or lower.startswith("scan ") or lower in ["scan", "掃描", "掃一下"]:
             parts = lower.split()
             if len(parts) > 1 and parts[1] == "gorilla":
                 mkt   = "TW" if (len(parts) > 2 and parts[2] in ["台股", "tw", "台灣"]) else "US"
