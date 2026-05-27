@@ -353,19 +353,33 @@ async def run_gorilla_diagnosis(symbol: str, user_id: str) -> None:
     try:
         is_tw  = symbol.isdigit()
         result = await (screen_tw(symbol) if is_tw else screen_us(symbol))
-        sig    = "BUY" if result.get("pass") else "NO_PASS"
-        flex   = build_gorilla_flex(sig, result)
+
+        earn   = result.get("earnings_warning")
+        if result.get("pass"):
+            sig = "BUY_WARN" if earn else "BUY"
+        else:
+            sig = "NO_PASS"
+
+        flex = build_gorilla_flex(sig, result)
         await push_flex(user_id, flex)
-        # 補充文字說明
+
         if result.get("pass"):
             passes = "\n".join(f"✅ {p}" for p in result.get("passes", []))
-            await push_line(user_id,
-                f"🦍 {symbol} 通過大猩猩篩選！\n\n{passes}\n\n"
-                f"建議以現價 {result['price']:.2f} 試單 5%，\n"
-                f"停損設在 {result['price'] * 0.925:.2f}（-7.5%）\n\n"
-                f"記錄進場：/gentry {symbol} {result['price']:.2f}")
+            if earn:
+                await push_line(user_id,
+                    f"🦍 {symbol} 基本面通過，但 ⚠️ {earn} 財報即將公布！\n\n"
+                    f"{passes}\n\n"
+                    "建議：等財報後確認方向再進場，\n"
+                    "不要在財報前追高。\n\n"
+                    f"財報後若股價站穩，再用：\n/gentry {symbol} [進場價]")
+            else:
+                await push_line(user_id,
+                    f"🦍 {symbol} 通過大猩猩篩選！\n\n{passes}\n\n"
+                    f"建議以現價 {result['price']:.2f} 試單 5%，\n"
+                    f"停損設在 {result['price'] * 0.925:.2f}（-7.5%）\n\n"
+                    f"記錄進場：/gentry {symbol} {result['price']:.2f}")
         else:
-            fails = "\n".join(f"❌ {f}" for f in result.get("fails", []))
+            fails  = "\n".join(f"❌ {f}" for f in result.get("fails", []))
             passes = "\n".join(f"✅ {p}" for p in result.get("passes", []))
             await push_line(user_id,
                 f"🦍 {symbol} 目前不符合大猩猩條件\n\n{fails}\n\n已通過：\n{passes}")
@@ -396,15 +410,18 @@ async def run_gorilla_scan(market: str, user_id: str) -> None:
                 "大盤安全但個股條件未到，繼續等待。")
             return
 
-        # 推播前三名
+        # 推播前三名（財報警告的用 BUY_WARN 樣式）
         for pick in picks[:3]:
-            flex = build_gorilla_flex("BUY", pick)
+            sig = "BUY_WARN" if pick.get("earnings_warning") else "BUY"
+            flex = build_gorilla_flex(sig, pick)
             await push_flex(user_id, flex)
 
+        warn_names = [p["ticker"] for p in picks if p.get("earnings_warning")]
         names = "、".join(p["ticker"] for p in picks)
+        warn_note = f"\n⚠️ {' / '.join(warn_names)} 財報警告，建議財報後再進場" if warn_names else ""
         await push_line(user_id,
             f"🦍 {flag} {label}今日大猩猩精選：{names}\n"
-            f"共 {len(picks)} 支通過篩選，以上為前 3 名。\n\n"
+            f"共 {len(picks)} 支通過篩選，以上為前 3 名。{warn_note}\n\n"
             "輸入代號查看完整 Swing 分析（如：NVDA）")
 
     except Exception as e:

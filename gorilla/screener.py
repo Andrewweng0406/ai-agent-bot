@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 
 import yfinance as yf
 
@@ -85,6 +86,44 @@ def _get_technical(ticker: str, is_tw: bool = False) -> dict | None:
 
 
 # ─────────────────────────────────────────────
+# 財報偵測（7 天內財報 → 警告，不直接 BUY）
+# ─────────────────────────────────────────────
+
+def _check_earnings(ticker: str) -> str | None:
+    """
+    回傳財報日期字串（如 "05/28"）若在未來 7 天內，否則回傳 None。
+    只對美股做偵測，台股跳過（FinMind 財報日曆較難取得）。
+    """
+    try:
+        t = yf.Ticker(ticker)
+
+        # 優先用 earnings_dates（較準確）
+        ed = t.earnings_dates
+        if ed is not None and not ed.empty:
+            now = datetime.now()
+            for idx in ed.index:
+                dt = idx.to_pydatetime().replace(tzinfo=None)
+                days = (dt - now).days
+                if -1 <= days <= 7:
+                    return dt.strftime("%m/%d")
+
+        # fallback: calendar
+        cal = t.calendar
+        if cal is not None and not cal.empty:
+            date_col = next((c for c in cal.columns if "Earnings" in c), None)
+            if date_col:
+                for raw in cal[date_col].dropna():
+                    dt = raw.to_pydatetime() if hasattr(raw, "to_pydatetime") else datetime.combine(raw, datetime.min.time())
+                    dt = dt.replace(tzinfo=None)
+                    days = (dt - datetime.now()).days
+                    if -1 <= days <= 7:
+                        return dt.strftime("%m/%d")
+    except Exception:
+        pass
+    return None
+
+
+# ─────────────────────────────────────────────
 # 美股大猩猩篩選
 # ─────────────────────────────────────────────
 
@@ -154,6 +193,7 @@ async def screen_us(ticker: str) -> dict:
         )
 
     passed = len(fails) == 0
+    earnings_warning = _check_earnings(ticker) if passed else None
 
     return {
         "ticker":               ticker,
@@ -173,6 +213,7 @@ async def screen_us(ticker: str) -> dict:
         "sma200":               tech["sma200"],
         "vol_ratio":            tech["vol_ratio"],
         "latest_quarter":       fund.get("latest_quarter"),
+        "earnings_warning":     earnings_warning,
     }
 
 

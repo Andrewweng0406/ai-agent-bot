@@ -5,12 +5,13 @@ Bloomberg 暗色風格，與現有 WengStock Swing 卡片視覺統一。
 from __future__ import annotations
 
 _SIGNAL_PALETTE = {
-    "BUY":         {"badge": "🦍 BUY 試單",   "color": "#00E676", "bg": "#0A2E1A"},
-    "ADD":         {"badge": "📈 加碼訊號",    "color": "#FFD600", "bg": "#2E2800"},
-    "STOP_LOSS":   {"badge": "🛑 停損出場",    "color": "#FF5252", "bg": "#2E0A0A"},
-    "TAKE_PROFIT": {"badge": "🎯 移動停利",    "color": "#00BFA5", "bg": "#002E2A"},
-    "DIAGNOSIS":   {"badge": "🔬 大猩猩診斷",  "color": "#82B1FF", "bg": "#0A1A2E"},
-    "NO_PASS":     {"badge": "❌ 不符條件",    "color": "#FF5252", "bg": "#2E0A0A"},
+    "BUY":         {"badge": "🦍 BUY 試單",      "color": "#00E676", "bg": "#0A2E1A"},
+    "BUY_WARN":    {"badge": "⚠️ BUY（財報警告）", "color": "#FFD600", "bg": "#2E2800"},
+    "ADD":         {"badge": "📈 加碼訊號",       "color": "#FFD600", "bg": "#2E2800"},
+    "STOP_LOSS":   {"badge": "🛑 停損出場",       "color": "#FF5252", "bg": "#2E0A0A"},
+    "TAKE_PROFIT": {"badge": "🎯 移動停利",       "color": "#00BFA5", "bg": "#002E2A"},
+    "DIAGNOSIS":   {"badge": "🔬 大猩猩診斷",     "color": "#82B1FF", "bg": "#0A1A2E"},
+    "NO_PASS":     {"badge": "❌ 不符條件",       "color": "#FF5252", "bg": "#2E0A0A"},
 }
 
 
@@ -140,8 +141,31 @@ def build_gorilla_flex(signal_type: str, result: dict) -> dict:
                               "#00E676" if vr >= 1.5 else "#FF9800"))
     body_contents.append(_divider())
 
+    # 財報警告區塊
+    earn_warn = result.get("earnings_warning")
+    if earn_warn:
+        body_contents += [
+            {
+                "type": "box", "layout": "vertical",
+                "backgroundColor": "#2E1A00", "cornerRadius": "md",
+                "paddingAll": "sm", "margin": "sm",
+                "contents": [{
+                    "type": "text",
+                    "text": f"⚠️ 財報警告：{earn_warn} 即將公布財報",
+                    "color": "#FFD600", "size": "sm",
+                    "weight": "bold", "align": "center", "wrap": True,
+                }, {
+                    "type": "text",
+                    "text": "財報前進場風險極高，建議財報後確認方向再操作",
+                    "color": "#FF9800", "size": "xs",
+                    "align": "center", "wrap": True, "margin": "xs",
+                }],
+            },
+            _divider(),
+        ]
+
     # 操作建議區塊（BUY / ADD）
-    if signal_type == "BUY":
+    if signal_type in ("BUY", "BUY_WARN"):
         stop = round(price * (1 - 0.075), 2)
         tgt1 = round(price * 1.20, 2)
         tgt2 = round(price * 1.40, 2)
