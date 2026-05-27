@@ -302,16 +302,17 @@ async def ai_generate_report(model: str, prompt: str) -> str:
     """
     async with _OPENAI_SEMAPHORE:
         log.info(f"[AI] model={model} | prompt={prompt[:60]}...")
-        # 實際串接時：
-        # import os
-        # client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        # resp = await client.chat.completions.create(
-        #     model=model,
-        #     messages=[{"role": "user", "content": prompt}],
-        #     max_tokens=600,
-        # )
-        # return resp.choices[0].message.content
-        return f"[Mock Report @ {datetime.now().strftime('%H:%M:%S')}] {prompt[:40]}..."
+        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "你是 WengStock AI，專業且重視風控的交易分析助理。用繁體中文回覆，簡潔直接，適合手機閱讀。"},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=600,
+            temperature=0.35,
+        )
+        return resp.choices[0].message.content
 
 
 # ─────────────────────────────────────────────
