@@ -5,13 +5,14 @@ Bloomberg 暗色風格，與現有 WengStock Swing 卡片視覺統一。
 from __future__ import annotations
 
 _SIGNAL_PALETTE = {
-    "BUY":         {"badge": "🦍 BUY 試單",      "color": "#00E676", "bg": "#0A2E1A"},
-    "BUY_WARN":    {"badge": "⚠️ BUY（財報警告）", "color": "#FFD600", "bg": "#2E2800"},
-    "ADD":         {"badge": "📈 加碼訊號",       "color": "#FFD600", "bg": "#2E2800"},
-    "STOP_LOSS":   {"badge": "🛑 停損出場",       "color": "#FF5252", "bg": "#2E0A0A"},
-    "TAKE_PROFIT": {"badge": "🎯 移動停利",       "color": "#00BFA5", "bg": "#002E2A"},
-    "DIAGNOSIS":   {"badge": "🔬 大猩猩診斷",     "color": "#82B1FF", "bg": "#0A1A2E"},
-    "NO_PASS":     {"badge": "❌ 不符條件",       "color": "#FF5252", "bg": "#2E0A0A"},
+    "BUY":          {"badge": "🦍 BUY 試單",        "color": "#00E676", "bg": "#0A2E1A"},
+    "BUY_WARN":     {"badge": "⚠️ BUY（財報警告）",  "color": "#FFD600", "bg": "#2E2800"},
+    "DUAL_CONFIRM": {"badge": "🔥 雙策略確認",       "color": "#FF6D00", "bg": "#2E1400"},
+    "ADD":          {"badge": "📈 加碼訊號",         "color": "#FFD600", "bg": "#2E2800"},
+    "STOP_LOSS":    {"badge": "🛑 停損出場",         "color": "#FF5252", "bg": "#2E0A0A"},
+    "TAKE_PROFIT":  {"badge": "🎯 移動停利",         "color": "#00BFA5", "bg": "#002E2A"},
+    "DIAGNOSIS":    {"badge": "🔬 大猩猩診斷",       "color": "#82B1FF", "bg": "#0A1A2E"},
+    "NO_PASS":      {"badge": "❌ 不符條件",         "color": "#FF5252", "bg": "#2E0A0A"},
 }
 
 
@@ -141,6 +142,37 @@ def build_gorilla_flex(signal_type: str, result: dict) -> dict:
                               "#00E676" if vr >= 1.5 else "#FF9800"))
     body_contents.append(_divider())
 
+    # Swing 雙確認區塊
+    if signal_type == "DUAL_CONFIRM":
+        sw = result.get("swing_setup", {})
+        body_contents.append(_label("▸ Swing 雙確認"))
+        body_contents.append(_kv("Setup 型態", sw.get("setup_type", "N/A"), "#FFFFFF"))
+        sw_rsi = sw.get("rsi")
+        if sw_rsi is not None:
+            body_contents.append(_kv(
+                "RSI", f"{sw_rsi:.1f}",
+                "#00E676" if 45 <= sw_rsi <= 70 else "#FF9800",
+            ))
+        sw_rr = sw.get("rr_ratio")
+        if sw_rr is not None:
+            body_contents.append(_kv(
+                "風報比", f"{sw_rr:.1f}R",
+                "#00E676" if sw_rr >= 2.0 else "#FF9800",
+            ))
+        sw_stop = sw.get("stop_loss_price") or sw.get("stop_loss", 0)
+        if sw_stop and sw_stop > 0:
+            body_contents.append(_kv("🛑 止損", f"${sw_stop:,.2f}", "#FF5252"))
+        sw_tgt = sw.get("target_1", 0)
+        if sw_tgt and sw_tgt > 0:
+            body_contents.append(_kv("🎯 目標一", f"${sw_tgt:,.2f}", "#00BFA5"))
+        sw_reasons = sw.get("reasons", [])
+        for r in sw_reasons[:3]:
+            body_contents.append({
+                "type": "text", "text": f"  ✅ {r}",
+                "color": "#00E676", "size": "xs", "margin": "xs", "wrap": True,
+            })
+        body_contents.append(_divider())
+
     # 財報警告區塊
     earn_warn = result.get("earnings_warning")
     if earn_warn:
@@ -164,8 +196,8 @@ def build_gorilla_flex(signal_type: str, result: dict) -> dict:
             _divider(),
         ]
 
-    # 操作建議區塊（BUY / ADD）
-    if signal_type in ("BUY", "BUY_WARN"):
+    # 操作建議區塊（BUY / ADD / DUAL_CONFIRM）
+    if signal_type in ("BUY", "BUY_WARN", "DUAL_CONFIRM"):
         stop = round(price * (1 - 0.075), 2)
         tgt1 = round(price * 1.20, 2)
         tgt2 = round(price * 1.40, 2)

@@ -349,15 +349,42 @@ RSI：{setup["rsi"]:.2f}
         await push_line(user_id, "⚠️ 出場分析時發生錯誤，請稍後再試。")
 
 
+async def _get_swing_data(symbol: str) -> dict:
+    """抓取並計算 Swing Setup，回傳 setup dict（失敗回傳空 dict）。"""
+    try:
+        loop         = asyncio.get_event_loop()
+        fetch_result = await loop.run_in_executor(None, router.route, symbol)
+        if fetch_result.daily.empty:
+            return {}
+        daily  = add_indicators(fetch_result.daily).dropna()
+        h4     = add_indicators(fetch_result.h4).dropna()
+        h1     = add_indicators(fetch_result.h1).dropna()
+        market = await loop.run_in_executor(None, get_market_filter)
+        return detect_swing_setup(daily, h4, h1, market)
+    except Exception as e:
+        print(f"⚠️ Swing data fetch failed [{symbol}]: {e}")
+        return {}
+
+
 async def run_gorilla_diagnosis(symbol: str, user_id: str) -> None:
-    """大猩猩即時診斷（單支股票）"""
+    """大猩猩即時診斷（單支股票），通過後自動疊加 Swing 雙確認。"""
     try:
         is_tw  = symbol.isdigit()
         result = await (screen_tw(symbol) if is_tw else screen_us(symbol))
 
-        earn   = result.get("earnings_warning")
-        if result.get("pass"):
-            sig = "BUY_WARN" if earn else "BUY"
+        earn = result.get("earnings_warning")
+
+        if result.get("pass") and not earn:
+            # 疊加 Swing 確認
+            swing = await _get_swing_data(symbol)
+            rating = swing.get("rating", "")
+            if "high quality" in rating.lower() or "🟢" in rating:
+                result["swing_setup"] = swing
+                sig = "DUAL_CONFIRM"
+            else:
+                sig = "BUY"
+        elif result.get("pass") and earn:
+            sig = "BUY_WARN"
         else:
             sig = "NO_PASS"
 
@@ -366,7 +393,17 @@ async def run_gorilla_diagnosis(symbol: str, user_id: str) -> None:
 
         if result.get("pass"):
             passes = "\n".join(f"✅ {p}" for p in result.get("passes", []))
-            if earn:
+            if sig == "DUAL_CONFIRM":
+                sw = result["swing_setup"]
+                await push_line(user_id,
+                    f"🔥 {symbol} 大猩猩 + Swing 雙策略確認！\n\n"
+                    f"{passes}\n\n"
+                    f"Swing 評級：{sw.get('rating', 'N/A')}\n"
+                    f"風報比：{sw.get('rr_ratio', 0):.1f}R\n\n"
+                    f"建議以現價 {result['price']:.2f} 試單 5%，\n"
+                    f"停損設在 {result['price'] * 0.925:.2f}（-7.5%）\n\n"
+                    f"記錄進場：/gentry {symbol} {result['price']:.2f}")
+            elif earn:
                 await push_line(user_id,
                     f"🦍 {symbol} 基本面通過，但 ⚠️ {earn} 財報即將公布！\n\n"
                     f"{passes}\n\n"
@@ -411,18 +448,30 @@ async def run_gorilla_scan(market: str, user_id: str) -> None:
                 "大盤安全但個股條件未到，繼續等待。")
             return
 
-        # 推播前三名（財報警告的用 BUY_WARN 樣式）
+        # 推播前三名（加入 Swing 雙確認）
+        dual_names = []
         for pick in picks[:3]:
-            sig = "BUY_WARN" if pick.get("earnings_warning") else "BUY"
+            if pick.get("earnings_warning"):
+                sig = "BUY_WARN"
+            else:
+                swing = await _get_swing_data(pick["ticker"])
+                rating = swing.get("rating", "")
+                if "high quality" in rating.lower() or "🟢" in rating:
+                    pick["swing_setup"] = swing
+                    sig = "DUAL_CONFIRM"
+                    dual_names.append(pick["ticker"])
+                else:
+                    sig = "BUY"
             flex = build_gorilla_flex(sig, pick)
             await push_flex(user_id, flex)
 
         warn_names = [p["ticker"] for p in picks if p.get("earnings_warning")]
         names = "、".join(p["ticker"] for p in picks)
         warn_note = f"\n⚠️ {' / '.join(warn_names)} 財報警告，建議財報後再進場" if warn_names else ""
+        dual_note = f"\n🔥 {' / '.join(dual_names)} 雙策略確認，優先考慮！" if dual_names else ""
         await push_line(user_id,
             f"🦍 {flag} {label}今日大猩猩精選：{names}\n"
-            f"共 {len(picks)} 支通過篩選，以上為前 3 名。{warn_note}\n\n"
+            f"共 {len(picks)} 支通過篩選，以上為前 3 名。{warn_note}{dual_note}\n\n"
             "輸入代號查看完整 Swing 分析（如：NVDA）")
 
     except Exception as e:
