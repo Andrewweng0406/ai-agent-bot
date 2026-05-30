@@ -33,6 +33,10 @@ from gorilla.screener import run_daily_scan
 from gorilla.position_manager import check_positions_sync, get_all_user_ids
 from gorilla.gorilla_flex import build_gorilla_flex
 from gorilla.subscribe import get_subscribers
+from agent import add_indicators, detect_swing_setup, get_market_filter
+from market_router import MarketRouter
+
+_swing_router = MarketRouter()
 
 # ─────────────────────────────────────────────
 # Logging 設定
@@ -682,6 +686,23 @@ async def _task_marketing_post(market: str) -> None:
 # 大猩猩策略排程任務
 # ─────────────────────────────────────────────
 
+async def _check_swing(ticker: str) -> dict:
+    """抓取 Swing 分析，回傳 setup dict；失敗回傳空 dict。"""
+    try:
+        loop = asyncio.get_event_loop()
+        fr   = await loop.run_in_executor(None, _swing_router.route, ticker)
+        if fr.daily.empty:
+            return {}
+        daily  = add_indicators(fr.daily).dropna()
+        h4     = add_indicators(fr.h4).dropna()
+        h1     = add_indicators(fr.h1).dropna()
+        market = await loop.run_in_executor(None, get_market_filter)
+        return detect_swing_setup(daily, h4, h1, market)
+    except Exception as e:
+        log.warning(f"⚠️ swing check failed [{ticker}]: {e}")
+        return {}
+
+
 async def _task_gorilla_scan_us() -> None:
     """每日美股大猩猩掃描（收盤後 22:30 ET）"""
     log.info("🦍 [大猩猩] 美股掃描 — 開始")
@@ -715,15 +736,31 @@ async def _task_gorilla_scan_us() -> None:
                 await send_line_push(uid, msg)
                 await asyncio.sleep(0.3)
         else:
+            # 為前三名加 Swing 雙確認檢查
+            tagged_picks = []
+            for pick in picks[:3]:
+                if pick.get("earnings_warning"):
+                    tagged_picks.append((pick, "BUY_WARN"))
+                else:
+                    swing = await _check_swing(pick["ticker"])
+                    rating = swing.get("rating", "")
+                    if "high quality" in rating.lower() or "🟢" in rating:
+                        pick["swing_setup"] = swing
+                        tagged_picks.append((pick, "DUAL_CONFIRM"))
+                    else:
+                        tagged_picks.append((pick, "BUY"))
+
+            dual = [p["ticker"] for p, s in tagged_picks if s == "DUAL_CONFIRM"]
             names = "、".join(p["ticker"] for p in picks[:5])
+            dual_note = f"\n🔥 {' / '.join(dual)} 雙策略確認，優先考慮！" if dual else ""
             summary = (
                 f"🦍🇺🇸 今日美股大猩猩精選：{names}\n"
-                f"共 {len(picks)} 支通過 CAN SLIM 篩選\n\n"
+                f"共 {len(picks)} 支通過 CAN SLIM 篩選{dual_note}\n\n"
                 "輸入 /gorilla 代號 查看完整診斷"
             )
             for uid in user_ids:
-                for pick in picks[:3]:
-                    flex = build_gorilla_flex("BUY", pick)
+                for pick, sig in tagged_picks:
+                    flex = build_gorilla_flex(sig, pick)
                     await send_line_push(uid, flex)
                     await asyncio.sleep(0.3)
                 await send_line_push(uid, summary)
@@ -767,15 +804,31 @@ async def _task_gorilla_scan_tw() -> None:
                 await send_line_push(uid, msg)
                 await asyncio.sleep(0.3)
         else:
+            # 為前三名加 Swing 雙確認檢查
+            tagged_picks = []
+            for pick in picks[:3]:
+                if pick.get("earnings_warning"):
+                    tagged_picks.append((pick, "BUY_WARN"))
+                else:
+                    swing = await _check_swing(pick["ticker"])
+                    rating = swing.get("rating", "")
+                    if "high quality" in rating.lower() or "🟢" in rating:
+                        pick["swing_setup"] = swing
+                        tagged_picks.append((pick, "DUAL_CONFIRM"))
+                    else:
+                        tagged_picks.append((pick, "BUY"))
+
+            dual = [p["ticker"] for p, s in tagged_picks if s == "DUAL_CONFIRM"]
             names = "、".join(p["ticker"] for p in picks[:5])
+            dual_note = f"\n🔥 {' / '.join(dual)} 雙策略確認，優先考慮！" if dual else ""
             summary = (
                 f"🦍🇹🇼 今日台股大猩猩精選：{names}\n"
-                f"共 {len(picks)} 支通過篩選\n\n"
+                f"共 {len(picks)} 支通過篩選{dual_note}\n\n"
                 "輸入 /gorilla 代號 查看完整診斷"
             )
             for uid in user_ids:
-                for pick in picks[:3]:
-                    flex = build_gorilla_flex("BUY", pick)
+                for pick, sig in tagged_picks:
+                    flex = build_gorilla_flex(sig, pick)
                     await send_line_push(uid, flex)
                     await asyncio.sleep(0.3)
                 await send_line_push(uid, summary)
